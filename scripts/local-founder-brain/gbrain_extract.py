@@ -749,29 +749,54 @@ def strip_duplicate_title(text: str) -> str:
 def split_text(text: str, max_bytes: int = MAX_MARKDOWN_BYTES) -> list[str]:
     if len(text.encode("utf-8")) <= max_bytes:
         return [text]
-    sections = re.split(r"(?=^#{1,3}\s)", text, flags=re.M)
+    sections = re.split(r"(?=^#{1,3}\s|^---\s*$|^\[?(?:page|slide|sheet)\s+\d+\]?\s*$)", text, flags=re.M | re.I)
     if len(sections) <= 1:
-        sections = re.split(r"(?=^\s*$)", text, flags=re.M)
+        sections = re.split(r"(?<=\n)\n+", text)
+
+    def append_bounded(value: str, output: list[str]) -> None:
+        """Split only at paragraph, line, or word boundaries; never raw bytes."""
+        if len(value.encode("utf-8")) <= max_bytes:
+            output.append(value.rstrip() + "\n")
+            return
+        paragraphs = re.split(r"(?<=\n)\n+", value)
+        if len(paragraphs) <= 1:
+            paragraphs = value.splitlines(keepends=True)
+        if len(paragraphs) <= 1:
+            paragraphs = re.findall(r"\S+\s*", value)
+        current_piece = ""
+        for paragraph in paragraphs:
+            if len(paragraph.encode("utf-8")) > max_bytes:
+                if current_piece:
+                    output.append(current_piece.rstrip() + "\n")
+                    current_piece = ""
+                words = re.findall(r"\S+\s*", paragraph)
+                if not words or any(len(word.encode("utf-8")) > max_bytes for word in words):
+                    raise ValueError("unbreakable_text_segment_exceeds_import_limit")
+                for word in words:
+                    if current_piece and len((current_piece + word).encode("utf-8")) > max_bytes:
+                        output.append(current_piece.rstrip() + "\n")
+                        current_piece = word
+                    else:
+                        current_piece += word
+                continue
+            if current_piece and len((current_piece + paragraph).encode("utf-8")) > max_bytes:
+                output.append(current_piece.rstrip() + "\n")
+                current_piece = paragraph
+            else:
+                current_piece += paragraph
+        if current_piece:
+            output.append(current_piece.rstrip() + "\n")
+
     parts: list[str] = []
     current = ""
     for section in sections:
         if not section:
             continue
         if len(section.encode("utf-8")) > max_bytes:
-            encoded = section.encode("utf-8")
-            while encoded:
-                take = encoded[:max_bytes]
-                while take:
-                    try:
-                        chunk = take.decode("utf-8")
-                        break
-                    except UnicodeDecodeError:
-                        take = take[:-1]
-                if current:
-                    parts.append(current.rstrip() + "\n")
-                    current = ""
-                parts.append(chunk.rstrip() + "\n")
-                encoded = encoded[len(take):]
+            if current:
+                parts.append(current.rstrip() + "\n")
+                current = ""
+            append_bounded(section, parts)
             continue
         candidate = current + section
         if current and len(candidate.encode("utf-8")) > max_bytes:
@@ -978,12 +1003,17 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
             if STOP or time.monotonic() >= deadline:
                 break
         terminal = "partial" if STOP or time.monotonic() >= deadline or counts["failed"] else "success"
+        outstanding = {
+            row[0]: row[1]
+            for row in db.execute("SELECT state,COUNT(*) FROM docs WHERE state IN ('partial','ocr_pending','failed','unsupported','excluded') GROUP BY state")
+        }
         manifest = {
             "schema_version": 1, "run_id": run_id,
             "started_at": db.execute("SELECT started_at FROM runs WHERE id=?", (run_id,)).fetchone()[0],
             "completed_at": now_iso(), "status": terminal, "extractor_version": VERSION,
             "extraction_version": EXTRACTION_VERSION, "config_hash": config_hash,
             "sources": [source.id for source in selected], "counts": counts,
+            "outstanding_states": outstanding,
             "outputs": manifest_outputs, "failures": manifest_failures,
         }
         atomic_write(manifest_path, json_dump(manifest) + "\n")

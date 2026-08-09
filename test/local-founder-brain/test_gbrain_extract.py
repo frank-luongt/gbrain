@@ -49,6 +49,14 @@ class ExtractionContractTest(unittest.TestCase):
         self.assertTrue(all(len(part.encode()) <= 1500 for part in first))
         self.assertEqual("".join(part.rstrip() + "\n" for part in first).replace("\n", ""), text.replace("\n", ""))
 
+    def test_split_preserves_paragraph_and_word_boundaries(self):
+        text = "\n\n".join(f"Paragraph {index} " + ("word " * 30) for index in range(12))
+        parts = extract.split_text(text, 180)
+        self.assertTrue(all(len(part.encode()) <= 180 for part in parts))
+        self.assertTrue(all(part.endswith("\n") for part in parts))
+        with self.assertRaisesRegex(ValueError, "unbreakable"):
+            extract.split_text("x" * 200, 100)
+
     def test_source_precedence_and_project_classification(self):
         sources = [
             extract.Source("faos-projects", Path("/tmp/Projects/FAOS"), "document-and-code"),
@@ -172,6 +180,7 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertIn('page_range: "1-40"', rendered)
             self.assertIn("outputs", latest_manifest)
             self.assertIn("failures", latest_manifest)
+            self.assertIn("outstanding_states", latest_manifest)
             self.assertTrue(latest_manifest["outputs"][0]["output_hash"])
 
     def test_state_migration_is_dry_run_first_and_backed_up(self):
