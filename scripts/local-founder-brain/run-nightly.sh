@@ -31,17 +31,12 @@ if ! pg_isready -h 127.0.0.1 -p 5432 >/dev/null; then
   print -u2 "PostgreSQL is unavailable at $cycle_started"
   exit 20
 fi
-if ! gbrain doctor --json --fast >/dev/null; then
-  print -u2 "gbrain readiness failed at $cycle_started"
-  exit 20
-fi
+# The generic doctor also evaluates unrelated resolver/skill policy. Those
+# findings belong in maintenance reporting, not in this bounded ingestion
+# readiness gate: the endpoint, PostgreSQL, Ollama, parsers, and staging
+# checks above are the dependencies this cycle actually needs.
 
-# Reserve 30 minutes of the four-hour wall clock for materialization and two bounded syncs.
-gbrain-extract run --time-limit 12600 --ocr-page-budget 2000
-gbrain-extract materialize
-gbrain-extract-commit-staging
-gbrain-extract-sync --timeout 900
-
-gbrain-extract status --json >"$status_file.tmp"
-mv "$status_file.tmp" "$status_file"
+# The cycle supervisor owns one 4h deadline and terminates every child process
+# group at its allocated share. It writes status only after all steps succeed.
+gbrain-extract-nightly-cycle --wall-clock 14400 --status-file "$status_file"
 print "founder extraction cycle complete: $cycle_started"

@@ -13,6 +13,8 @@ install -m 0755 "$script_dir/gbrain_source_reassign.py" "$bin_dir/gbrain-source-
 install -m 0755 "$script_dir/gbrain_extract_health.py" "$bin_dir/gbrain-extract-health"
 install -m 0755 "$script_dir/gbrain_heartbeat_wrapper.py" "$bin_dir/gbrain-founder-heartbeat"
 install -m 0755 "$script_dir/gbrain_sync_staging.py" "$bin_dir/gbrain-extract-sync"
+install -m 0755 "$script_dir/gbrain_notebooklm.py" "$bin_dir/gbrain-notebooklm"
+install -m 0755 "$script_dir/gbrain_nightly.py" "$bin_dir/gbrain-extract-nightly-cycle"
 install -m 0755 "$script_dir/commit-staging.sh" "$bin_dir/gbrain-extract-commit-staging"
 install -m 0755 "$script_dir/run-nightly.sh" "$bin_dir/gbrain-extract-nightly"
 
@@ -23,6 +25,13 @@ else
   print "preserving existing $data_root/sources.json"
 fi
 
+notebooklm_config="$HOME/.gbrain/notebooklm.json"
+if [[ ! -e "$notebooklm_config" ]]; then
+  install -m 0600 "$script_dir/notebooklm.example.json" "$notebooklm_config"
+else
+  print "preserving existing $notebooklm_config"
+fi
+
 sed "s|__HOME__|$HOME|g" "$script_dir/com.frankbrain.extract.plist.template" >"$plist.tmp"
 plutil -lint "$plist.tmp" >/dev/null
 mv "$plist.tmp" "$plist"
@@ -30,5 +39,6 @@ chmod 0600 "$plist"
 
 print "installed gbrain-extract to $bin_dir"
 print "configuration: $data_root/sources.json"
+print "NotebookLM configuration: $notebooklm_config"
 print "LaunchAgent prepared at $plist"
 print "activate after backup and migration: launchctl bootstrap gui/$UID $plist"

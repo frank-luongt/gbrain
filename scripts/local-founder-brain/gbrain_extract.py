@@ -33,7 +33,7 @@ from typing import Iterable, Iterator, Sequence
 from xml.etree import ElementTree as ET
 
 VERSION = "1.0.0"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXTRACTION_VERSION = "founder-local-v1"
 MAX_MARKDOWN_BYTES = 3_500_000
 MAX_ZIP_EXPANDED_BYTES = 512_000_000
@@ -162,7 +162,8 @@ def slugify(value: str) -> str:
 
 def sniff_magic(path: Path) -> str:
     try:
-        head = path.open("rb").read(16)
+        with path.open("rb") as handle:
+            head = handle.read(16)
     except OSError:
         return "unreadable"
     if head.startswith(MAGIC_PDF):
@@ -304,6 +305,7 @@ def ensure_schema(db: sqlite3.Connection) -> None:
         "source_id": "TEXT", "document_id": "TEXT", "extraction_version": "TEXT",
         "extraction_hash": "TEXT", "error_code": "TEXT", "retry_count": "INTEGER NOT NULL DEFAULT 0",
         "page_count": "INTEGER", "completed_pages": "INTEGER NOT NULL DEFAULT 0",
+        "completed_page_ranges": "TEXT",
     }
     columns = table_columns(db, "docs")
     for name, ddl in additions.items():
@@ -332,14 +334,47 @@ def migration_preview(db: sqlite3.Connection, sources: Sequence[Source]) -> dict
     }
 
 
+def state_schema_version(db: sqlite3.Connection) -> int:
+    """Return the recorded schema version without altering a legacy database."""
+    if "meta" not in {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        return 0
+    row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    try:
+        return int(row[0]) if row else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def state_schema_current(db: sqlite3.Connection) -> bool:
+    required_docs = {
+        "source_id", "document_id", "extraction_version", "extraction_hash", "error_code",
+        "retry_count", "page_count", "completed_pages", "completed_page_ranges",
+    }
+    required_tables = {"source_memberships", "ocr_ranges", "outputs", "runs"}
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return (
+        state_schema_version(db) >= SCHEMA_VERSION
+        and required_tables.issubset(tables)
+        and required_docs.issubset(table_columns(db, "docs"))
+    )
+
+
 def migrate_state(db_path: Path, sources: Sequence[Source], dry_run: bool) -> dict[str, int]:
     if dry_run:
         uri = f"file:{db_path.resolve()}?mode=ro"
         with sqlite3.connect(uri, uri=True) as db:
             db.row_factory = sqlite3.Row
-            return migration_preview(db, sources)
+            preview = migration_preview(db, sources)
+            preview["schema_version"] = state_schema_version(db)
+            preview["already_current"] = int(state_schema_current(db))
+            return preview
     with connect(db_path) as db:
         preview = migration_preview(db, sources)
+        preview["schema_version"] = state_schema_version(db)
+        if state_schema_current(db):
+            preview["already_current"] = 1
+            preview["backup_created"] = 0
+            return preview
         backup = db_path.with_name(f"{db_path.name}.pre-v{SCHEMA_VERSION}-{int(time.time())}.bak")
         with sqlite3.connect(backup) as target:
             db.backup(target)
@@ -379,6 +414,7 @@ def migrate_state(db_path: Path, sources: Sequence[Source], dry_run: bool) -> di
         db.execute("UPDATE docs SET source_id=(SELECT source_id FROM source_memberships sm WHERE sm.sha256=docs.sha256 AND sm.is_owner=1 LIMIT 1)")
         db.commit()
         preview["backup_created"] = 1
+        preview["already_current"] = 0
         return preview
 
 
@@ -407,7 +443,13 @@ def iter_files(source: Source) -> Iterator[Path]:
             if path.is_symlink() or should_skip(path, source.root):
                 continue
             ext = path.suffix.lower()
-            if ext in DOCUMENT_EXTS or (source.pipeline == "document-and-code" and ext in TEXT_EXTS):
+            # Google Drive workspaces contain founder-authored Markdown, exported
+            # JSON/JSONL, and configuration alongside binary documents.  Those
+            # direct-text formats are safe to normalize for every document source;
+            # the same suffix/exclusion guards still reject binaries, caches and
+            # generated content.  `document-and-code` remains a provenance label,
+            # not a reason to silently omit textual Drive evidence.
+            if ext in DOCUMENT_EXTS or ext in TEXT_EXTS:
                 yield path
 
 
@@ -473,6 +515,23 @@ def completed_ocr_pages(db: sqlite3.Connection, content_hash: str) -> set[int]:
     return pages
 
 
+def format_page_ranges(pages: Iterable[int]) -> str | None:
+    """Render completed OCR pages compactly without inventing coverage gaps."""
+    ordered = sorted(set(pages))
+    if not ordered:
+        return None
+    ranges: list[str] = []
+    first = previous = ordered[0]
+    for page in ordered[1:]:
+        if page == previous + 1:
+            previous = page
+            continue
+        ranges.append(str(first) if first == previous else f"{first}-{previous}")
+        first = previous = page
+    ranges.append(str(first) if first == previous else f"{first}-{previous}")
+    return ",".join(ranges)
+
+
 def extract_ocr_window(path: Path, db: sqlite3.Connection, content_hash: str, remaining_budget: int) -> tuple[Extraction, int]:
     if not all(Path(tool).exists() for tool in (PDFTOPPM, TESSERACT)):
         return Extraction("", "ocr:tesseract-vie+eng", "ocr_pending", "missing_ocr_tool", "pdftoppm or tesseract unavailable"), 0
@@ -481,9 +540,18 @@ def extract_ocr_window(path: Path, db: sqlite3.Connection, content_hash: str, re
         return Extraction("", "ocr:tesseract-vie+eng", "failed", "page_count_unknown", None), 0
     done = completed_ocr_pages(db, content_hash)
     pending = [page for page in range(1, total + 1) if page not in done]
-    if not pending or remaining_budget <= 0:
+    if not pending:
         rows = db.execute("SELECT output_text FROM ocr_ranges WHERE sha256=? ORDER BY first_page", (content_hash,)).fetchall()
         return Extraction(validate_text("\n\n".join(row[0] for row in rows), 20), "ocr:tesseract-vie+eng", "extracted", page_count=total, page_range=f"1-{total}"), 0
+    if remaining_budget <= 0:
+        rows = db.execute("SELECT output_text FROM ocr_ranges WHERE sha256=? ORDER BY first_page", (content_hash,)).fetchall()
+        if not rows:
+            return Extraction("", "ocr:tesseract-vie+eng", "ocr_pending", "ocr_budget_exhausted", page_count=total), 0
+        return Extraction(
+            validate_text("\n\n".join(row[0] for row in rows), 20),
+            "ocr:tesseract-vie+eng", "partial", "ocr_incomplete",
+            page_count=total, page_range=format_page_ranges(done),
+        ), 0
     window = pending[: min(OCR_WINDOW_PAGES, remaining_budget)]
     first_page, last_page = window[0], window[-1]
     page_text: list[str] = []
@@ -507,7 +575,11 @@ def extract_ocr_window(path: Path, db: sqlite3.Connection, content_hash: str, re
     done.update(range(first_page, last_page + 1))
     all_text = "\n\n".join(row[0] for row in db.execute("SELECT output_text FROM ocr_ranges WHERE sha256=? ORDER BY first_page", (content_hash,)))
     status = "extracted" if len(done) >= total else "partial"
-    return Extraction(validate_text(all_text, 20), "ocr:tesseract-vie+eng", status, None if status == "extracted" else "ocr_incomplete", page_count=total, page_range=f"1-{max(done)}"), len(window)
+    return Extraction(
+        validate_text(all_text, 20), "ocr:tesseract-vie+eng", status,
+        None if status == "extracted" else "ocr_incomplete", page_count=total,
+        page_range=f"1-{total}" if status == "extracted" else format_page_ranges(done),
+    ), len(window)
 
 
 def extract_with_textutil(path: Path) -> Extraction:
@@ -653,7 +725,9 @@ def yaml_scalar(value: object) -> str:
 
 def render_markdown(row: sqlite3.Row, source_id: str, text: str, aliases: list[str], part: int, total: int, extraction: Extraction | None = None) -> str:
     document_id = row["document_id"] or stable_document_id(row["sha256"])
-    page_range = extraction.page_range if extraction else (f"1-{row['completed_pages']}" if row["state"] == "partial" and row["completed_pages"] else None)
+    page_range = extraction.page_range if extraction else (
+        row["completed_page_ranges"] or (f"1-{row['completed_pages']}" if row["state"] == "partial" and row["completed_pages"] else None)
+    )
     status = extraction.status if extraction else ("partial" if row["state"] == "partial" else "complete")
     fields: list[tuple[str, object]] = [
         ("schema_version", 1), ("document_id", document_id), ("source_id", source_id),
@@ -741,6 +815,8 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
     deadline = time.monotonic() + args.time_limit
     ocr_budget = args.ocr_page_budget
     counts = {"discovered": 0, "extracted": 0, "partial": 0, "skipped": 0, "failed": 0, "unsupported": 0, "excluded": 0, "ocr_pages": 0}
+    manifest_outputs: list[dict[str, object]] = []
+    manifest_failures: list[dict[str, object]] = []
     config_hash = hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
     run_id = uuid.uuid4().hex
     DEFAULT_LOGS.mkdir(parents=True, exist_ok=True)
@@ -778,15 +854,38 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                     if extraction.text:
                         output_path = write_corpus_output(db, row, extraction)
                     extraction_hash = hashlib.sha256((EXTRACTION_VERSION + "\0" + extraction.text).encode()).hexdigest() if extraction.text else None
+                    if output_path:
+                        manifest_outputs.append({
+                            "document_id": row["document_id"] or stable_document_id(row["sha256"]),
+                            "content_hash": row["sha256"],
+                            "extraction_hash": extraction_hash,
+                            "output_hash": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+                        })
+                    ocr_pages = completed_ocr_pages(db, row["sha256"]) if extraction.extractor.startswith("ocr:") else set()
+                    completed_pages = (
+                        extraction.page_count
+                        if extraction.status == "extracted" and extraction.page_count is not None
+                        else len(ocr_pages)
+                    )
+                    completed_page_ranges = format_page_ranges(ocr_pages) if ocr_pages else extraction.page_range
                     db.execute(
                         """UPDATE docs SET state=?,extract_chars=?,out_path=?,extractor=?,reason=?,error_code=?,
-                           extraction_version=?,extraction_hash=?,page_count=?,completed_pages=?,updated_at=? WHERE sha256=?""",
+                           extraction_version=?,extraction_hash=?,page_count=?,completed_pages=?,completed_page_ranges=?,updated_at=? WHERE sha256=?""",
                         (extraction.status, len(extraction.text), str(output_path) if output_path else None, extraction.extractor,
                          extraction.reason, extraction.error_code, EXTRACTION_VERSION, extraction_hash, extraction.page_count,
-                         used_pages if extraction.status == "partial" else extraction.page_count or 0, now_iso(), row["sha256"]),
+                         completed_pages, completed_page_ranges, now_iso(), row["sha256"]),
                     )
                     if extraction.status == "failed":
                         db.execute("UPDATE docs SET retry_count=retry_count+1 WHERE sha256=?", (row["sha256"],))
+                    if extraction.status in {"failed", "excluded", "unsupported", "ocr_pending"}:
+                        manifest_failures.append({
+                            "document_id": row["document_id"] or stable_document_id(row["sha256"]),
+                            "content_hash": row["sha256"],
+                            "source_id": row["source_id"],
+                            "state": extraction.status,
+                            "error_code": extraction.error_code,
+                            "reason": extraction.reason,
+                        })
                     db.commit()
                     counts[extraction.status] = counts.get(extraction.status, 0) + 1
                     counts["ocr_pages"] += used_pages
@@ -794,10 +893,25 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                     db.execute("UPDATE docs SET state='failed',error_code='extract_exception',reason=?,retry_count=retry_count+1,updated_at=? WHERE sha256=?", (str(error)[:1000], now_iso(), row["sha256"]))
                     db.commit()
                     counts["failed"] += 1
+                    manifest_failures.append({
+                        "document_id": row["document_id"] or stable_document_id(row["sha256"]),
+                        "content_hash": row["sha256"],
+                        "source_id": row["source_id"],
+                        "state": "failed",
+                        "error_code": "extract_exception",
+                        "reason": str(error)[:1000],
+                    })
             if STOP or time.monotonic() >= deadline:
                 break
         terminal = "partial" if STOP or time.monotonic() >= deadline or counts["failed"] else "success"
-        manifest = {"schema_version": 1, "run_id": run_id, "started_at": db.execute("SELECT started_at FROM runs WHERE id=?", (run_id,)).fetchone()[0], "completed_at": now_iso(), "status": terminal, "extractor_version": VERSION, "extraction_version": EXTRACTION_VERSION, "config_hash": config_hash, "sources": [source.id for source in selected], "counts": counts}
+        manifest = {
+            "schema_version": 1, "run_id": run_id,
+            "started_at": db.execute("SELECT started_at FROM runs WHERE id=?", (run_id,)).fetchone()[0],
+            "completed_at": now_iso(), "status": terminal, "extractor_version": VERSION,
+            "extraction_version": EXTRACTION_VERSION, "config_hash": config_hash,
+            "sources": [source.id for source in selected], "counts": counts,
+            "outputs": manifest_outputs, "failures": manifest_failures,
+        }
         atomic_write(manifest_path, json_dump(manifest) + "\n")
         db.execute("UPDATE runs SET completed_at=?,status=?,counts_json=? WHERE id=?", (manifest["completed_at"], terminal, json_dump(counts), run_id))
         db.commit()

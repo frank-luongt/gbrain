@@ -15,6 +15,28 @@ ingestion. Human-approved FrankBrain publishing remains a separate workflow.
 writeback. Personal and FAOSX NotebookLM profiles remain read-through/capture integrations; this
 filesystem pipeline does not scrape them.
 
+## NotebookLM read-through and capture
+
+`gbrain-notebooklm` is a small local adapter over the existing NotebookLM skill. Its configuration
+is `~/.gbrain/notebooklm.json`, created from `notebooklm.example.json` by the installer. It contains
+only the two public account scopes and their skill profile names; browser sessions, cookies, and
+other credentials stay solely inside the NotebookLM skill's profile directories.
+
+```bash
+gbrain-notebooklm status --account notebooklm-personal
+gbrain-notebooklm query --account notebooklm-personal --notebook-id NOTEBOOK_ID --question "What decision is documented?"
+gbrain-notebooklm capture --account notebooklm-faosx --notebook-id NOTEBOOK_ID \
+  --title "Research capture" --answer "Explicitly captured answer" --question "Question asked"
+```
+
+Every operation requires exactly one of `notebooklm-personal` or `notebooklm-faosx`; an adapter
+process invokes the skill wrapper with only that configured profile. It never authenticates an
+account, exports a browser session, or combines account contexts. Query results retain the source,
+profile, notebook identity, private sensitivity, and a structured reference. Explicit captures are
+written atomically to `~/gbrain-sources/inbox/notebooklm/<source-id>/` with `status: review` and
+`requires_founder_approval: true`; they never enter `frankbrain` automatically. NotebookLM content
+is read-through only and must not be bulk-mirrored or filesystem-scraped.
+
 The walker excludes build products, caches, model artifacts, Claude worktrees/audio, staging, and
 `wiki/frankbrain/`. Generated pages are `local_only`, `generated: true`, and
 `ingest_to_canonical: false`.
