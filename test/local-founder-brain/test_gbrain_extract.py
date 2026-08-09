@@ -261,6 +261,35 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertIsNotNone(stale["completed_at"])
             self.assertEqual(recovered["state"], "extracted")
 
+    def test_governed_document_failure_does_not_invalidate_completed_cycle(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "drive"
+            source_root.mkdir()
+            document = source_root / "bad.md"
+            document.write_text("# Bad fixture\n", encoding="utf-8")
+            config = root / "sources.json"
+            config.write_text(json.dumps({"schema_version": 1, "sources": [{
+                "id": "gdrive-workspaces", "root": str(source_root), "pipeline": "document", "enabled": True,
+            }]}), encoding="utf-8")
+            db_path = root / "state.sqlite3"
+            source = extract.Source("gdrive-workspaces", source_root.resolve(), "document")
+            original = extract.DATA_ROOT, extract.DEFAULT_LOGS, extract.DEFAULT_CORPUS, extract.route_extract
+            try:
+                extract.DATA_ROOT, extract.DEFAULT_LOGS, extract.DEFAULT_CORPUS = root, root / "logs", root / "corpus"
+                extract.route_extract = lambda *_args: (extract.Extraction("", "fixture", "failed", "fixture_failure"), 0)
+                extract.run_extract(types.SimpleNamespace(
+                    source="gdrive-workspaces", document=str(document), time_limit=60, ocr_page_budget=0,
+                    max_retries=3, config=str(config), db=str(db_path),
+                ), [source])
+            finally:
+                extract.DATA_ROOT, extract.DEFAULT_LOGS, extract.DEFAULT_CORPUS, extract.route_extract = original
+            with extract.connect(db_path) as db:
+                status = db.execute("SELECT status FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()["status"]
+                failure = db.execute("SELECT state,error_code FROM docs").fetchone()
+            self.assertEqual(status, "success")
+            self.assertEqual((failure["state"], failure["error_code"]), ("failed", "fixture_failure"))
+
     def test_frontmatter_is_governed(self):
         with tempfile.TemporaryDirectory() as temp:
             db = sqlite3.connect(":memory:")

@@ -914,6 +914,7 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
     counts = {"discovered": 0, "extracted": 0, "partial": 0, "skipped": 0, "failed": 0, "unsupported": 0, "excluded": 0, "ocr_pages": 0}
     manifest_outputs: list[dict[str, object]] = []
     manifest_failures: list[dict[str, object]] = []
+    source_discovery_failed = False
     config_hash = hashlib.sha256(Path(args.config).read_bytes()).hexdigest()
     run_id = uuid.uuid4().hex
     DEFAULT_LOGS.mkdir(parents=True, exist_ok=True)
@@ -1027,6 +1028,7 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                         "reason": str(error)[:1000],
                     })
             if isinstance(source_files, DiscoveryStream) and source_files.error:
+                source_discovery_failed = True
                 counts["failed"] += 1
                 manifest_failures.append({
                     "document_id": None, "content_hash": None, "source_id": source.id,
@@ -1035,7 +1037,12 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                 })
             if STOP or time.monotonic() >= deadline:
                 break
-        terminal = "partial" if STOP or time.monotonic() >= deadline or counts["failed"] else "success"
+        # A completed cycle can contain bounded, governed document failures:
+        # they are retained in the manifest/state and retried according to
+        # policy.  They must not make every healthy nightly cycle appear
+        # stale forever.  Only an incomplete process-level cycle or a failed
+        # source traversal prevents freshness from advancing.
+        terminal = "partial" if STOP or time.monotonic() >= deadline or source_discovery_failed else "success"
         outstanding = {
             row[0]: row[1]
             for row in db.execute("SELECT state,COUNT(*) FROM docs WHERE state IN ('partial','ocr_pending','failed','unsupported','excluded') GROUP BY state")
