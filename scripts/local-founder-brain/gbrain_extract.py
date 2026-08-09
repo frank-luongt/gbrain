@@ -1275,8 +1275,15 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
             for item in report["invalid_output"]:
                 move_to_quarantine(Path(item["path"]))
                 db.execute(
-                    """UPDATE docs SET state=CASE WHEN ?='pdf_font_encoding_garbage' THEN 'ocr_pending' ELSE 'discovered' END,
-                       out_path=NULL,error_code=?,reason='reconcile requested regeneration' WHERE out_path=?""",
+                    """UPDATE docs SET state=CASE
+                           WHEN state='excluded' THEN 'excluded'
+                           WHEN ?='pdf_font_encoding_garbage' THEN 'ocr_pending'
+                           ELSE 'discovered'
+                       END,
+                       out_path=NULL,error_code=?,
+                       reason=CASE WHEN state='excluded' THEN 'invalid generated output quarantined'
+                                   ELSE 'reconcile requested regeneration' END
+                       WHERE out_path=?""",
                     (item["error_code"], item["error_code"], item["path"]),
                 )
             db.execute(
