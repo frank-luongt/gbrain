@@ -95,7 +95,11 @@ def main() -> int:
         # missing the active local Ollama vector. It is intentionally last so
         # every newly imported page is eligible and its bounded process group
         # cannot starve extraction, reconciliation, or source sync.
-        steps.append(run_bounded(["gbrain", "embed", "--stale"], remaining()))
+        # `--catch-up` is essential: the default command stops after one
+        # batch, leaving a large imported source apparently fresh but only
+        # partly embedded.  The enclosing four-hour deadline remains the
+        # operational bound.
+        steps.append(run_bounded(["gbrain", "embed", "--stale", "--catch-up"], remaining()))
         status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
         steps.append(status_step)
         last_run = status_step.get("result", {}).get("last_run", {})
