@@ -5,6 +5,8 @@ node_modules
 bin/
 .DS_Store
 *.log
+__pycache__/
+*.py[cod]
 .env
 .env.*
 !.env.*.example
