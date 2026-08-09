@@ -76,7 +76,7 @@ gbrain-source-reassign --reconcile-owner --apply
 
 The transaction changes page source ownership and frontmatter only. Page IDs stay stable, so
 versions, chunks, embeddings, tags, timeline entries, and links remain attached. It rolls back if
-page, chunk, version, or link counts change.
+page, chunk, embedded/missing-embedding, version, or link counts change.
 The owner-reconciliation pass then applies the extractor's Google-Drive-first exact-hash dedup
 decision, rather than guessing ownership from whichever alias happened to be imported first.
 
@@ -118,7 +118,10 @@ launchctl kickstart -k "gui/$UID/com.frankbrain.extract"
 ```
 
 It runs at 02:30, uses a non-blocking process lock, and writes status and logs under
-`~/gbrain-sources/logs/`. Treat a missing successful run within 24 hours as a heartbeat alert.
+`~/gbrain-sources/logs/`. Each cycle performs extraction, deterministic reconciliation,
+materialization, local staging commit, and source-scoped sync within one four-hour budget. Treat a
+missing successful run within 24 hours as a heartbeat alert; a partial or failed cycle never refreshes
+the successful-cycle timestamp.
 `gbrain-extract-health` provides the machine-readable probe and exits non-zero when the marker is
 missing, failed, or older than 24 hours.
 
@@ -129,7 +132,7 @@ status marker has been created; no credential or document content is copied into
 
 ## Recovery
 
-- Restore extractor state from `extract-state.sqlite3.pre-v2-*.bak`.
+- Restore extractor state from `extract-state.sqlite3.pre-v3-*.bak`.
 - Restore PostgreSQL from the proven backup before repeating source reassignment.
 - Quarantined output is recoverable under `~/gbrain-sources/quarantine/`.
 - Re-running extraction and materialization is idempotent; unchanged inputs are not reprocessed.

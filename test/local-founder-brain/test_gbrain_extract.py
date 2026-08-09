@@ -357,6 +357,22 @@ class HealthContractTest(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertTrue(result["stale"])
 
+    def test_partial_cycle_without_a_recent_success_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            status = Path(temp) / "status.json"
+            status.write_text(json.dumps({"cycle_status": "partial", "last_run": {"status": "partial"}}), encoding="utf-8")
+            result = health.probe(status, 24)
+            self.assertFalse(result["ready"])
+
+    def test_recent_success_remains_fresh_while_current_cycle_is_partial(self):
+        with tempfile.TemporaryDirectory() as temp:
+            status = Path(temp) / "status.json"
+            status.write_text(json.dumps({
+                "cycle_status": "partial", "last_success_at": extract.now_iso(), "last_run": {"status": "partial"},
+            }), encoding="utf-8")
+            result = health.probe(status, 24)
+            self.assertTrue(result["ready"])
+
     def test_nightly_readiness_is_dependency_aware_and_four_hour_bounded(self):
         source = (ROOT / "scripts/local-founder-brain/run-nightly.sh").read_text()
         supervisor = (ROOT / "scripts/local-founder-brain/gbrain_nightly.py").read_text()
@@ -368,6 +384,8 @@ class HealthContractTest(unittest.TestCase):
         self.assertIn("os.killpg", supervisor)
         self.assertIn("start_new_session=True", supervisor)
         self.assertIn('"--ocr-page-budget", "2000"', supervisor)
+        self.assertIn('"reconcile", "--fix-safe"', supervisor)
+        self.assertIn("last_success_at", supervisor)
 
     def test_heartbeat_wrapper_fails_closed_on_extraction_freshness(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_heartbeat_wrapper.py").read_text()

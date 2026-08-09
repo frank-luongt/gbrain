@@ -9,25 +9,57 @@ import os
 import signal
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 
-def run_bounded(argv: list[str], seconds: float) -> None:
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def atomic_write(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def run_bounded(argv: list[str], seconds: float) -> dict[str, Any]:
     if seconds <= 0:
         raise RuntimeError("nightly_deadline_exhausted")
-    process = subprocess.Popen(argv, start_new_session=True)
+    started = time.monotonic()
+    process = subprocess.Popen(argv, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        process.wait(timeout=seconds)
+        stdout, stderr = process.communicate(timeout=seconds)
     except subprocess.TimeoutExpired as exc:
         os.killpg(process.pid, signal.SIGTERM)
         try:
-            process.wait(timeout=10)
+            stdout, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-        raise RuntimeError(f"nightly_step_timeout:{argv[0]}") from exc
+            stdout, stderr = process.communicate()
+        raise RuntimeError(f"nightly_step_timeout:{argv[0]}:{stderr[-500:]}") from exc
     if process.returncode:
-        raise RuntimeError(f"nightly_step_failed:{argv[0]}:{process.returncode}")
+        raise RuntimeError(f"nightly_step_failed:{argv[0]}:{process.returncode}:{stderr[-500:]}")
+    result: dict[str, Any] = {
+        "command": argv[0], "elapsed_seconds": round(time.monotonic() - started, 2),
+    }
+    try:
+        result["result"] = json.loads(stdout)
+    except json.JSONDecodeError:
+        result["stdout_tail"] = stdout[-500:]
+    if stderr:
+        result["stderr_tail"] = stderr[-500:]
+    return result
+
+
+def previous_success(path: Path) -> str | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("last_success_at")
+        return str(value) if value else None
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def main() -> int:
@@ -35,26 +67,42 @@ def main() -> int:
     parser.add_argument("--wall-clock", type=int, default=14_400)
     parser.add_argument("--status-file", required=True)
     args = parser.parse_args()
+    status_path = Path(args.status_file)
     deadline = time.monotonic() + args.wall_clock
+    steps: list[dict[str, Any]] = []
 
     def remaining(reserve: int = 0) -> float:
         return max(0, deadline - time.monotonic() - reserve)
 
-    # 30m is reserved for both source-scoped syncs, 10m for materialization,
-    # and 5m for the local-only staging commit. Every child is independently
-    # terminated at its share of the same global deadline.
-    run_bounded(["gbrain-extract", "run", "--time-limit", str(int(min(12_600, remaining(2_700)))), "--ocr-page-budget", "2000"], remaining(2_700))
-    run_bounded(["gbrain-extract", "materialize"], min(600, remaining(2_100)))
-    run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(1_800)))
-    run_bounded(["gbrain-extract-sync", "--timeout", "900"], remaining())
-    status_path = Path(args.status_file)
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    output = subprocess.check_output(["gbrain-extract", "status", "--json"], text=True, timeout=max(1, remaining()))
-    payload = json.loads(output)
-    temporary = status_path.with_suffix(status_path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, status_path)
-    return 0
+    try:
+        # Reserve 30m for both source-scoped syncs, 10m each for deterministic
+        # reconciliation/materialization, and 5m for the local staging commit.
+        steps.append(run_bounded(
+            ["gbrain-extract", "run", "--time-limit", str(int(min(11_100, remaining(3_300)))), "--ocr-page-budget", "2000"],
+            remaining(3_300),
+        ))
+        steps.append(run_bounded(["gbrain-extract", "reconcile", "--fix-safe"], min(600, remaining(2_700))))
+        steps.append(run_bounded(["gbrain-extract", "materialize"], min(600, remaining(2_100))))
+        steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(1_800))))
+        steps.append(run_bounded(["gbrain-extract-sync", "--timeout", "900"], remaining()))
+        status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
+        steps.append(status_step)
+        last_run = status_step.get("result", {}).get("last_run", {})
+        cycle_status = "success" if last_run.get("status") == "success" else "partial"
+        last_success_at = now_iso() if cycle_status == "success" else previous_success(status_path)
+        payload = {
+            "schema_version": 2, "completed_at": now_iso(), "cycle_status": cycle_status,
+            "last_success_at": last_success_at, "last_run": last_run, "steps": steps,
+        }
+        atomic_write(status_path, payload)
+        return 0 if cycle_status == "success" else 2
+    except Exception as error:
+        atomic_write(status_path, {
+            "schema_version": 2, "completed_at": now_iso(), "cycle_status": "failed",
+            "last_success_at": previous_success(status_path), "error": str(error), "steps": steps,
+        })
+        print(f"gbrain-extract-nightly-cycle: {error}", file=os.sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

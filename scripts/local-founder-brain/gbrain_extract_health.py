@@ -15,13 +15,14 @@ def probe(path: Path, max_age_hours: float) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         last_run = payload.get("last_run") or {}
-        completed = last_run.get("completed_at")
+        completed = payload.get("last_success_at")
         if not completed:
-            raise ValueError("last_run.completed_at is missing")
+            raise ValueError("last_success_at is missing")
         timestamp = datetime.fromisoformat(str(completed).replace("Z", "+00:00"))
         age = (datetime.now(timezone.utc) - timestamp).total_seconds() / 3600
-        stale = age > max_age_hours or last_run.get("status") not in {"success", "partial"}
-        result.update({"ready": not stale, "age_hours": round(age, 2), "stale": stale, "last_run": last_run})
+        stale = age > max_age_hours
+        result.update({"ready": not stale, "age_hours": round(age, 2), "stale": stale,
+                       "last_success_at": completed, "cycle_status": payload.get("cycle_status"), "last_run": last_run})
     except Exception as error:
         result.update({"ready": False, "stale": True, "error": str(error)})
     return result
