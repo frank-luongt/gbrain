@@ -224,6 +224,42 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertEqual(current["already_current"], 1)
             self.assertEqual(current["backup_created"], 0)
 
+    def test_next_run_recovers_interrupted_cycle_and_inflight_document(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "drive"
+            source_root.mkdir()
+            document = source_root / "note.md"
+            document.write_text("# Recovery note\n\nEnough evidence for a retry.\n", encoding="utf-8")
+            config = root / "sources.json"
+            config.write_text(json.dumps({"schema_version": 1, "sources": [{
+                "id": "gdrive-workspaces", "root": str(source_root), "pipeline": "document", "enabled": True,
+            }]}), encoding="utf-8")
+            db_path = root / "state.sqlite3"
+            source = extract.Source("gdrive-workspaces", source_root.resolve(), "document")
+            with extract.connect(db_path) as db:
+                extract.ensure_schema(db)
+                row, _ = extract.upsert_discovery(db, source, document)
+                db.execute("UPDATE docs SET state='extracting' WHERE sha256=?", (row["sha256"],))
+                db.execute("INSERT INTO runs(id,started_at,config_hash,extractor_version,status) VALUES(?,?,?,?,?)",
+                           ("stale-run", extract.now_iso(), "old", extract.VERSION, "running"))
+                db.commit()
+            original = extract.DATA_ROOT, extract.DEFAULT_LOGS, extract.DEFAULT_CORPUS
+            try:
+                extract.DATA_ROOT, extract.DEFAULT_LOGS, extract.DEFAULT_CORPUS = root, root / "logs", root / "corpus"
+                extract.run_extract(types.SimpleNamespace(
+                    source="gdrive-workspaces", document=str(document), time_limit=60, ocr_page_budget=0,
+                    max_retries=3, config=str(config), db=str(db_path),
+                ), [source])
+            finally:
+                extract.DATA_ROOT, extract.DEFAULT_LOGS, extract.DEFAULT_CORPUS = original
+            with extract.connect(db_path) as db:
+                stale = db.execute("SELECT status,completed_at FROM runs WHERE id='stale-run'").fetchone()
+                recovered = db.execute("SELECT state,error_code FROM docs").fetchone()
+            self.assertEqual(stale["status"], "interrupted")
+            self.assertIsNotNone(stale["completed_at"])
+            self.assertEqual(recovered["state"], "extracted")
+
     def test_frontmatter_is_governed(self):
         with tempfile.TemporaryDirectory() as temp:
             db = sqlite3.connect(":memory:")
