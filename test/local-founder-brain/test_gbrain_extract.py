@@ -77,6 +77,7 @@ class ExtractionContractTest(unittest.TestCase):
         root = Path("/tmp/Projects/FAOS/repo")
         self.assertTrue(extract.should_skip(root / "wiki/frankbrain/generated.md", root))
         self.assertTrue(extract.should_skip(root / ".claude/worktrees/x/file.md", root))
+        self.assertTrue(extract.should_skip(root / "plugins/cache/x/file.md", root))
         self.assertTrue(extract.should_skip(root / "node_modules/pkg/index.js", root))
         self.assertFalse(extract.should_skip(root / "docs/research.jsonl", root))
 

@@ -74,7 +74,7 @@ SOURCE_DEFAULTS = (
 
 SKIP_DIRS = {
     ".git", ".hg", ".svn", ".claude", ".turbo", ".mypy_cache", ".ruff_cache",
-    ".pytest_cache", ".next", ".cache", "node_modules", "vendor", "dist", "build",
+    ".pytest_cache", ".next", ".cache", "cache", "node_modules", "vendor", "dist", "build",
     "target", "coverage", "htmlcov", "venv", ".venv", "env", "__pycache__",
     "site-packages", "Pods", "DerivedData", "wiki/frankbrain", "corpus-md", "staging",
 }
@@ -1122,8 +1122,25 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                 continue
             try:
                 body = validate_text(strip_duplicate_title(strip_legacy_frontmatter(source_path.read_text(encoding="utf-8", errors="replace"))), 20)
-            except ValueError:
+            except ValueError as error:
                 counts["missing"] += 1
+                if not args.dry_run:
+                    source = next((candidate for candidate in sources if candidate.id == source_id), None)
+                    original_path = Path(row["src_path"])
+                    if source and should_skip(original_path, source.root):
+                        db.execute(
+                            """UPDATE docs SET state='excluded',error_code='generated_path_excluded',
+                                   reason='source path matches current generated/cache exclusion',updated_at=?
+                               WHERE sha256=?""",
+                            (now_iso(), row["sha256"]),
+                        )
+                    else:
+                        db.execute(
+                            """UPDATE docs SET state='discovered',error_code='invalid_corpus_output',
+                                   reason=?,updated_at=? WHERE sha256=?""",
+                            (f"raw extraction output failed validation: {error}", now_iso(), row["sha256"]),
+                        )
+                    db.commit()
                 continue
             try:
                 parts = split_text(body, MAX_MARKDOWN_BYTES - 8_000)
