@@ -15,14 +15,15 @@ import hashlib
 import html
 import json
 import os
+import queue
 import re
-import selectors
 import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 import uuid
@@ -123,35 +124,44 @@ class DiscoveryStream:
 
     def __iter__(self) -> Iterator[Path]:
         command = [sys.executable, str(Path(__file__).resolve()), "_discover", "--root", str(self.source.root)]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, bufsize=0)
         assert process.stdout is not None
-        selector = selectors.DefaultSelector()
-        selector.register(process.stdout, selectors.EVENT_READ)
-        buffered = b""
-        try:
-            while selector.get_map() or buffered:
-                while b"\n" in buffered:
-                    line, buffered = buffered.split(b"\n", 1)
-                    try:
-                        path = Path(json.loads(line.decode("utf-8")))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        self.error = f"discovery_protocol_error:{self.source.id}"
-                        os.killpg(process.pid, signal.SIGTERM)
+        lines: queue.Queue[bytes | None] = queue.Queue()
+
+        def drain_stdout() -> None:
+            # Keep draining independently from per-document extraction.  A
+            # synchronous reader can otherwise leave the child blocked in
+            # write(2) once a large CloudStorage tree fills its pipe, while
+            # the parent waits for another selector event: a deadlock.
+            try:
+                while True:
+                    line = process.stdout.readline()
+                    if not line:
                         break
-                    self.last_path = str(path)
-                    yield path
-                if self.error or not selector.get_map():
-                    break
-                events = selector.select(timeout=self.idle_timeout)
-                if not events:
+                    lines.put(line)
+            finally:
+                lines.put(None)
+
+        reader = threading.Thread(target=drain_stdout, name=f"gbrain-discover-{self.source.id}", daemon=True)
+        reader.start()
+        try:
+            while True:
+                try:
+                    line = lines.get(timeout=self.idle_timeout)
+                except queue.Empty:
                     self.error = f"discovery_idle_timeout:{self.source.id}:{self.idle_timeout:g}s:last={self.last_path or '<none>'}"
                     os.killpg(process.pid, signal.SIGTERM)
                     break
-                chunk = os.read(process.stdout.fileno(), 8192)
-                if not chunk:
-                    selector.unregister(process.stdout)
+                if line is None:
                     break
-                buffered += chunk
+                try:
+                    path = Path(json.loads(line.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    self.error = f"discovery_protocol_error:{self.source.id}"
+                    os.killpg(process.pid, signal.SIGTERM)
+                    break
+                self.last_path = str(path)
+                yield path
             try:
                 _, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
@@ -160,10 +170,10 @@ class DiscoveryStream:
             if process.returncode and self.error is None:
                 self.error = f"discovery_worker_failed:{self.source.id}:{process.returncode}:{stderr[-500:].decode('utf-8', 'replace')}"
         finally:
-            selector.close()
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
                 process.wait(timeout=10)
+            reader.join(timeout=1)
 
 
 @dataclass
