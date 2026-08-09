@@ -80,6 +80,19 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertNotIn("blob.bin", discovered)
             self.assertNotIn("ignored.js", discovered)
 
+    def test_discovery_runs_out_of_process_and_streams_supported_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "note.md").write_text("# note\n", encoding="utf-8")
+            stream = extract.discover_files(extract.Source("gdrive-workspaces", root, "document", True), 5)
+            self.assertEqual([path.name for path in stream], ["note.md"])
+            self.assertIsNone(stream.error)
+
+    def test_discovery_timeout_is_recorded_as_governed_source_failure(self):
+        stream = extract.DiscoveryStream(extract.Source("gdrive-workspaces", Path("/tmp"), "document", True), 1)
+        stream.error = "discovery_idle_timeout:gdrive-workspaces:120s:last=<none>"
+        self.assertIn("discovery_idle_timeout", stream.error)
+
     def test_ocr_budget_exhaustion_preserves_partial_coverage(self):
         with tempfile.TemporaryDirectory() as temp:
             db = sqlite3.connect(":memory:")

@@ -16,6 +16,7 @@ import html
 import json
 import os
 import re
+import selectors
 import shutil
 import signal
 import sqlite3
@@ -109,6 +110,54 @@ class Source:
     root: Path
     pipeline: str
     enabled: bool = True
+
+
+@dataclass
+class DiscoveryStream:
+    """Stream a source from a disposable filesystem-walker subprocess."""
+
+    source: Source
+    idle_timeout: float
+    error: str | None = None
+    last_path: str | None = None
+
+    def __iter__(self) -> Iterator[Path]:
+        command = [sys.executable, str(Path(__file__).resolve()), "_discover", "--root", str(self.source.root)]
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        assert process.stdout is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        try:
+            while selector.get_map():
+                events = selector.select(timeout=self.idle_timeout)
+                if not events:
+                    self.error = f"discovery_idle_timeout:{self.source.id}:{self.idle_timeout:g}s:last={self.last_path or '<none>'}"
+                    os.killpg(process.pid, signal.SIGTERM)
+                    break
+                line = process.stdout.readline()
+                if not line:
+                    selector.unregister(process.stdout)
+                    break
+                try:
+                    path = Path(json.loads(line))
+                except json.JSONDecodeError:
+                    self.error = f"discovery_protocol_error:{self.source.id}"
+                    os.killpg(process.pid, signal.SIGTERM)
+                    break
+                self.last_path = str(path)
+                yield path
+            try:
+                _, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                _, stderr = process.communicate()
+            if process.returncode and self.error is None:
+                self.error = f"discovery_worker_failed:{self.source.id}:{process.returncode}:{stderr[-500:]}"
+        finally:
+            selector.close()
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=10)
 
 
 @dataclass
@@ -456,6 +505,11 @@ def iter_files(source: Source) -> Iterator[Path]:
             # not a reason to silently omit textual Drive evidence.
             if ext in DOCUMENT_EXTS or ext in TEXT_EXTS:
                 yield path
+
+
+def discover_files(source: Source, idle_timeout: float) -> DiscoveryStream:
+    """Do not let a CloudStorage `scandir` hold the extractor state lock."""
+    return DiscoveryStream(source, idle_timeout)
 
 
 def extract_ooxml(path: Path, kind: str) -> Extraction:
@@ -832,7 +886,9 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
         db.commit()
         seen_hashes: set[str] = set()
         for source in selected:
-            source_files: Iterable[Path] = [targeted_path] if targeted_path else iter_files(source)
+            source_files: Iterable[Path] = [targeted_path] if targeted_path else discover_files(
+                source, getattr(args, "discovery_idle_timeout", 120.0),
+            )
             for path in source_files:
                 if STOP or time.monotonic() >= deadline:
                     break
@@ -906,6 +962,13 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                         "error_code": "extract_exception",
                         "reason": str(error)[:1000],
                     })
+            if isinstance(source_files, DiscoveryStream) and source_files.error:
+                counts["failed"] += 1
+                manifest_failures.append({
+                    "document_id": None, "content_hash": None, "source_id": source.id,
+                    "state": "failed", "error_code": "source_discovery_failed",
+                    "reason": source_files.error,
+                })
             if STOP or time.monotonic() >= deadline:
                 break
         terminal = "partial" if STOP or time.monotonic() >= deadline or counts["failed"] else "success"
@@ -1121,6 +1184,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--time-limit", type=int, default=DEFAULT_TIME_LIMIT)
     run.add_argument("--ocr-page-budget", type=int, default=DEFAULT_OCR_PAGE_BUDGET)
     run.add_argument("--max-retries", type=int, default=3)
+    run.add_argument("--discovery-idle-timeout", type=float, default=120.0,
+                     help="seconds without a discovered path before a source walker is terminated")
     stat = sub.add_parser("status")
     stat.add_argument("--source")
     stat.add_argument("--json", action="store_true")
@@ -1133,6 +1198,8 @@ def build_parser() -> argparse.ArgumentParser:
     mat.add_argument("--dry-run", action="store_true")
     mig = sub.add_parser("migrate-state")
     mig.add_argument("--dry-run", action="store_true")
+    discover = sub.add_parser("_discover", help=argparse.SUPPRESS)
+    discover.add_argument("--root", required=True)
     return parser
 
 
@@ -1140,6 +1207,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     args = build_parser().parse_args(argv)
+    if args.command == "_discover":
+        for path in iter_files(Source("_discover", Path(args.root), "document", True)):
+            print(json.dumps(str(path)), flush=True)
+        return 0
     sources = load_sources(Path(args.config))
     try:
         if args.command == "run":
