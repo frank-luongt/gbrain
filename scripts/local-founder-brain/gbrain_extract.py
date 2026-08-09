@@ -760,31 +760,29 @@ def split_text(text: str, max_bytes: int = MAX_MARKDOWN_BYTES) -> list[str]:
         paragraphs = re.split(r"(?<=\n)\n+", value)
         if len(paragraphs) <= 1:
             paragraphs = value.splitlines(keepends=True)
-        if len(paragraphs) <= 1:
-            paragraphs = re.findall(r"\S+\s*", value)
-        current_piece = ""
-        for paragraph in paragraphs:
-            if len(paragraph.encode("utf-8")) > max_bytes:
-                if current_piece:
-                    output.append(current_piece.rstrip() + "\n")
-                    current_piece = ""
-                words = re.findall(r"\S+\s*", paragraph)
-                if not words or any(len(word.encode("utf-8")) > max_bytes for word in words):
-                    raise ValueError("unbreakable_text_segment_exceeds_import_limit")
-                for word in words:
-                    if current_piece and len((current_piece + word).encode("utf-8")) > max_bytes:
-                        output.append(current_piece.rstrip() + "\n")
-                        current_piece = word
-                    else:
-                        current_piece += word
-                continue
-            if current_piece and len((current_piece + paragraph).encode("utf-8")) > max_bytes:
-                output.append(current_piece.rstrip() + "\n")
-                current_piece = paragraph
-            else:
-                current_piece += paragraph
-        if current_piece:
-            output.append(current_piece.rstrip() + "\n")
+
+        def append_units(units: Iterable[str], *, words: bool = False) -> None:
+            current_units: list[str] = []
+            current_bytes = 0
+            for unit in units:
+                unit_bytes = len(unit.encode("utf-8"))
+                if unit_bytes > max_bytes:
+                    if current_units:
+                        output.append("".join(current_units).rstrip() + "\n")
+                        current_units, current_bytes = [], 0
+                    if words:
+                        raise ValueError("unbreakable_text_segment_exceeds_import_limit")
+                    append_units((match.group(0) for match in re.finditer(r"\S+\s*", unit)), words=True)
+                    continue
+                if current_units and current_bytes + unit_bytes > max_bytes:
+                    output.append("".join(current_units).rstrip() + "\n")
+                    current_units, current_bytes = [], 0
+                current_units.append(unit)
+                current_bytes += unit_bytes
+            if current_units:
+                output.append("".join(current_units).rstrip() + "\n")
+
+        append_units(paragraphs)
 
     parts: list[str] = []
     current = ""

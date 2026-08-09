@@ -57,6 +57,12 @@ class ExtractionContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unbreakable"):
             extract.split_text("x" * 200, 100)
 
+    def test_split_handles_large_single_line_without_quadratic_concatenation(self):
+        text = "word " * 120_000
+        parts = extract.split_text(text, 100_000)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part.encode()) <= 100_000 for part in parts))
+
     def test_source_precedence_and_project_classification(self):
         sources = [
             extract.Source("faos-projects", Path("/tmp/Projects/FAOS"), "document-and-code"),
