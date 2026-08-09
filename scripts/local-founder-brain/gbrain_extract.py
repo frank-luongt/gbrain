@@ -1134,6 +1134,7 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
     report: dict[str, object] = {
         "manifest_missing": [], "orphans": [], "invalid_output": [], "oversized": [],
         "partial": 0, "recoverable_budget_failures": 0, "unstructured_failures": 0,
+        "legacy_ocr_ranges_backfilled": 0, "coverage_unknown_requeued": 0,
     }
     corpus_roots = [DATA_ROOT / "corpus-md", DEFAULT_CORPUS]
     with connect(Path(args.db)) as db:
@@ -1169,6 +1170,20 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
                 if path.stat().st_size > MAX_MARKDOWN_BYTES:
                     report["oversized"].append(resolved)
         report["partial"] = db.execute("SELECT COUNT(*) FROM docs WHERE state='partial'").fetchone()[0]
+        # Legacy `TRUNCATED@20` output was deterministically the first OCR
+        # window, so retain it as a truthful 1-20 range. Other old partial
+        # rows have only an aggregate count; do not fabricate a range for
+        # them. Requeue those records for a fresh, range-tracked OCR pass.
+        report["legacy_ocr_ranges_backfilled"] = db.execute(
+            """SELECT COUNT(*) FROM docs WHERE state='partial'
+               AND (completed_page_ranges IS NULL OR completed_page_ranges='')
+               AND extractor LIKE '%TRUNCATED@20%' AND completed_pages=20"""
+        ).fetchone()[0]
+        report["coverage_unknown_requeued"] = db.execute(
+            """SELECT COUNT(*) FROM docs WHERE state='partial'
+               AND (completed_page_ranges IS NULL OR completed_page_ranges='')
+               AND NOT (extractor LIKE '%TRUNCATED@20%' AND completed_pages=20)"""
+        ).fetchone()[0]
         if args.fix_safe and not args.dry_run:
             quarantine = DEFAULT_QUARANTINE / datetime.now().strftime("%Y%m%d-%H%M%S")
             def move_to_quarantine(path: Path) -> None:
@@ -1202,6 +1217,17 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
             db.execute(
                 """UPDATE docs SET state='excluded',error_code='insufficient_direct_text',reason='insufficient direct text'
                    WHERE state='ocr_pending' AND error_code='insufficient_text' AND magic<>'pdf'"""
+            )
+            db.execute(
+                """UPDATE docs SET completed_page_ranges='1-20',error_code='ocr_incomplete'
+                   WHERE state='partial' AND (completed_page_ranges IS NULL OR completed_page_ranges='')
+                     AND extractor LIKE '%TRUNCATED@20%' AND completed_pages=20"""
+            )
+            db.execute(
+                """UPDATE docs SET state='ocr_pending',completed_pages=0,completed_page_ranges=NULL,
+                       error_code='ocr_coverage_unknown',reason='legacy partial coverage unknown',retry_count=0
+                   WHERE state='partial' AND (completed_page_ranges IS NULL OR completed_page_ranges='')
+                     AND NOT (extractor LIKE '%TRUNCATED@20%' AND completed_pages=20)"""
             )
             db.execute(
                 "UPDATE docs SET error_code='invalid_zip' WHERE state='failed' AND error_code='extract_exception' AND reason LIKE 'File is not a zip file%'"

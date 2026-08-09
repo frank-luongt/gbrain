@@ -439,6 +439,13 @@ class HealthContractTest(unittest.TestCase):
         self.assertIn("DELETE FROM outputs WHERE sha256=? AND source_id=?", source)
         self.assertIn("SELECT 1 FROM outputs o WHERE o.sha256=docs.sha256 AND o.source_id=docs.source_id", source)
 
+    def test_reconcile_repairs_only_proven_legacy_ocr_ranges(self):
+        source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()
+        self.assertIn("legacy_ocr_ranges_backfilled", source)
+        self.assertIn("coverage_unknown_requeued", source)
+        self.assertIn("completed_page_ranges='1-20'", source)
+        self.assertIn("error_code='ocr_coverage_unknown'", source)
+
     def test_heartbeat_wrapper_fails_closed_on_extraction_freshness(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_heartbeat_wrapper.py").read_text()
         self.assertIn('"founder_extraction"', source)
