@@ -928,7 +928,7 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
             db.execute(
                 """UPDATE docs SET state='discovered',error_code='interrupted',
                        reason='previous extraction process interrupted',updated_at=?
-                   WHERE state="extracting""",
+                   WHERE state = 'extracting'""",
                 (interrupted_at,),
             )
             db.commit()
