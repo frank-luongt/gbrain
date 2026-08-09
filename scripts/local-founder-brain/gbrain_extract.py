@@ -123,36 +123,42 @@ class DiscoveryStream:
 
     def __iter__(self) -> Iterator[Path]:
         command = [sys.executable, str(Path(__file__).resolve()), "_discover", "--root", str(self.source.root)]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         assert process.stdout is not None
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
+        buffered = b""
         try:
-            while selector.get_map():
+            while selector.get_map() or buffered:
+                while b"\n" in buffered:
+                    line, buffered = buffered.split(b"\n", 1)
+                    try:
+                        path = Path(json.loads(line.decode("utf-8")))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        self.error = f"discovery_protocol_error:{self.source.id}"
+                        os.killpg(process.pid, signal.SIGTERM)
+                        break
+                    self.last_path = str(path)
+                    yield path
+                if self.error or not selector.get_map():
+                    break
                 events = selector.select(timeout=self.idle_timeout)
                 if not events:
                     self.error = f"discovery_idle_timeout:{self.source.id}:{self.idle_timeout:g}s:last={self.last_path or '<none>'}"
                     os.killpg(process.pid, signal.SIGTERM)
                     break
-                line = process.stdout.readline()
-                if not line:
+                chunk = os.read(process.stdout.fileno(), 8192)
+                if not chunk:
                     selector.unregister(process.stdout)
                     break
-                try:
-                    path = Path(json.loads(line))
-                except json.JSONDecodeError:
-                    self.error = f"discovery_protocol_error:{self.source.id}"
-                    os.killpg(process.pid, signal.SIGTERM)
-                    break
-                self.last_path = str(path)
-                yield path
+                buffered += chunk
             try:
                 _, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 _, stderr = process.communicate()
             if process.returncode and self.error is None:
-                self.error = f"discovery_worker_failed:{self.source.id}:{process.returncode}:{stderr[-500:]}"
+                self.error = f"discovery_worker_failed:{self.source.id}:{process.returncode}:{stderr[-500:].decode('utf-8', 'replace')}"
         finally:
             selector.close()
             if process.poll() is None:
