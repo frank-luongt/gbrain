@@ -474,6 +474,7 @@ class SyncContractTest(unittest.TestCase):
         supervisor = (ROOT / "scripts/local-founder-brain/gbrain_nightly.py").read_text()
         self.assertIn('"gdrive-workspaces", "--timeout", "900"', supervisor)
         self.assertIn('"faos-projects", "--timeout", "900", "--slices", "8"', supervisor)
+        self.assertIn('["gbrain", "embed", "--stale"]', supervisor)
 
     def test_staging_commit_refuses_any_remote(self):
         source = (ROOT / "scripts/local-founder-brain/commit-staging.sh").read_text()

@@ -80,7 +80,8 @@ def main() -> int:
         # FAOS up to eight 15-minute resume slices rather than one monolithic
         # process or a once-per-day replay. The phase caps sum to the cycle:
         # extraction 45m, reconcile 10m, materialize 45m, staging commit 5m,
-        # Drive sync 15m, and FAOS sync 120m.
+        # Drive sync 15m, and FAOS sync 120m. When the earlier phases finish
+        # early, the remainder is a local Ollama stale-embedding backfill.
         steps.append(run_bounded(
             ["gbrain-extract", "run", "--time-limit", str(int(min(2_700, remaining(11_700)))), "--ocr-page-budget", "2000"],
             remaining(11_700),
@@ -90,6 +91,11 @@ def main() -> int:
         steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(8_100))))
         steps.append(run_bounded(["gbrain-extract-sync", "--source", "gdrive-workspaces", "--timeout", "900"], min(900, remaining(7_200))))
         steps.append(run_bounded(["gbrain-extract-sync", "--source", "faos-projects", "--timeout", "900", "--slices", "8"], remaining()))
+        # `embed --stale` is global in gbrain, but only operates on chunks
+        # missing the active local Ollama vector. It is intentionally last so
+        # every newly imported page is eligible and its bounded process group
+        # cannot starve extraction, reconciliation, or source sync.
+        steps.append(run_bounded(["gbrain", "embed", "--stale"], remaining()))
         status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
         steps.append(status_step)
         last_run = status_step.get("result", {}).get("last_run", {})
