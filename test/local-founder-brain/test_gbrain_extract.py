@@ -427,6 +427,11 @@ class HealthContractTest(unittest.TestCase):
         self.assertIn('counts["partial"] = 1', source)
         self.assertIn('counts["documents"] % 100 == 0', source)
 
+    def test_reextraction_invalidates_only_its_materialized_parts(self):
+        source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()
+        self.assertIn("DELETE FROM outputs WHERE sha256=? AND source_id=?", source)
+        self.assertIn("SELECT 1 FROM outputs o WHERE o.sha256=docs.sha256 AND o.source_id=docs.source_id", source)
+
     def test_heartbeat_wrapper_fails_closed_on_extraction_freshness(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_heartbeat_wrapper.py").read_text()
         self.assertIn('"founder_extraction"', source)

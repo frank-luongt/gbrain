@@ -966,6 +966,10 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                          extraction.reason, extraction.error_code, EXTRACTION_VERSION, extraction_hash, extraction.page_count,
                          completed_pages, completed_page_ranges, now_iso(), row["sha256"]),
                     )
+                    if output_path:
+                        # A re-extraction invalidates only this document's
+                        # staged parts; unchanged pages remain checkpointed.
+                        db.execute("DELETE FROM outputs WHERE sha256=? AND source_id=?", (row["sha256"], source.id))
                     if extraction.status == "failed":
                         db.execute("UPDATE docs SET retry_count=retry_count+1 WHERE sha256=?", (row["sha256"],))
                     if extraction.status in {"failed", "excluded", "unsupported", "ocr_pending"}:
@@ -1053,7 +1057,11 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
     }
     with connect(Path(args.db)) as db:
         ensure_schema(db)
-        query = "SELECT * FROM docs WHERE state IN ('extracted','partial') AND out_path IS NOT NULL"
+        query = """SELECT * FROM docs
+                   WHERE state IN ('extracted','partial') AND out_path IS NOT NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM outputs o WHERE o.sha256=docs.sha256 AND o.source_id=docs.source_id
+                     )"""
         params: list[object] = []
         if args.source:
             query += " AND source_id=?"
