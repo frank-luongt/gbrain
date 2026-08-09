@@ -910,6 +910,28 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
     manifest_path = DEFAULT_LOGS / f"run-{run_id}.json"
     with process_lock(), connect(Path(args.db)) as db:
         ensure_schema(db)
+        # The filesystem lock proves there is no live peer using this state
+        # database.  A `running` row at this point is therefore a process that
+        # was interrupted (power loss, SIGKILL, or an unresponsive file
+        # provider), not a concurrent cycle.  Close its audit record and make
+        # its in-flight document eligible for a deterministic retry.
+        interrupted_at = now_iso()
+        stale_runs = db.execute(
+            "SELECT id FROM runs WHERE status='running'"
+        ).fetchall()
+        if stale_runs:
+            db.execute(
+                """UPDATE runs SET status='interrupted',completed_at=?,counts_json=?
+                   WHERE status='running'""",
+                (interrupted_at, json_dump({"recovery": "interrupted_before_next_run"})),
+            )
+            db.execute(
+                """UPDATE docs SET state='discovered',error_code='interrupted',
+                       reason='previous extraction process interrupted',updated_at=?
+                   WHERE state="extracting""",
+                (interrupted_at,),
+            )
+            db.commit()
         db.execute("INSERT INTO runs(id,started_at,config_hash,extractor_version,status,manifest_path) VALUES(?,?,?,?,?,?)", (run_id, now_iso(), config_hash, VERSION, "running", str(manifest_path)))
         db.commit()
         seen_hashes: set[str] = set()
