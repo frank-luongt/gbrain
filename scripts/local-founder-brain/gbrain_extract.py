@@ -311,7 +311,6 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     for name, ddl in additions.items():
         if name not in columns:
             db.execute(f"ALTER TABLE docs ADD COLUMN {name} {ddl}")
-    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
     db.commit()
 
 
@@ -352,8 +351,12 @@ def state_schema_current(db: sqlite3.Connection) -> bool:
     }
     required_tables = {"source_memberships", "ocr_ranges", "outputs", "runs"}
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "meta" not in tables or "docs" not in tables:
+        return False
+    migrated = db.execute("SELECT value FROM meta WHERE key='migration_v3_completed'").fetchone()
     return (
         state_schema_version(db) >= SCHEMA_VERSION
+        and migrated is not None and migrated[0] == "1"
         and required_tables.issubset(tables)
         and required_docs.issubset(table_columns(db, "docs"))
     )
@@ -412,6 +415,8 @@ def migrate_state(db_path: Path, sources: Sequence[Source], dry_run: bool) -> di
             )"""
         )
         db.execute("UPDATE docs SET source_id=(SELECT source_id FROM source_memberships sm WHERE sm.sha256=docs.sha256 AND sm.is_owner=1 LIMIT 1)")
+        db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+        db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('migration_v3_completed','1')")
         db.commit()
         preview["backup_created"] = 1
         preview["already_current"] = 0
