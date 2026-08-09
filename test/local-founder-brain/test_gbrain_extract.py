@@ -254,10 +254,21 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertEqual(result.status, "failed")
             self.assertEqual(result.error_code, "invalid_zip")
 
+    def test_ooxml_insufficient_text_is_excluded_not_sent_to_ocr(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "empty.docx"
+            import zipfile
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", "<document><p>x</p></document>")
+            result = extract.extract_ooxml(path, "docx")
+            self.assertEqual(result.status, "excluded")
+            self.assertEqual(result.error_code, "insufficient_text")
+
     def test_reconcile_repairs_exhausted_ocr_budget_failures(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()
         self.assertIn("recovered after exhausted OCR budget", source)
-        self.assertIn("extractor LIKE '%TRUNCATED@20%' THEN 'partial' ELSE 'ocr_pending'", source)
+        self.assertIn("WHEN magic='pdf' THEN 'ocr_pending'", source)
+        self.assertIn("insufficient_direct_text", source)
 
     def test_materialization_preserves_legacy_relative_slug(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()

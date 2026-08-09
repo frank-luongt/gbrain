@@ -546,8 +546,7 @@ def extract_ooxml(path: Path, kind: str) -> Extraction:
     except NotImplementedError as error:
         return Extraction("", f"ooxml-zip:{kind}", "excluded", "unsupported_zip_compression", str(error))
     except ValueError as error:
-        status = "ocr_pending" if str(error) == "insufficient_text" else "excluded"
-        return Extraction("", f"ooxml-zip:{kind}", status, str(error), None)
+        return Extraction("", f"ooxml-zip:{kind}", "excluded", str(error), None)
 
 
 def extract_pdf_text(path: Path) -> Extraction:
@@ -1130,7 +1129,7 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
             for row in db.execute("SELECT out_path,extractor FROM docs WHERE out_path IS NOT NULL")
         }
         report["recoverable_budget_failures"] = db.execute(
-            "SELECT COUNT(*) FROM docs WHERE state='failed' AND error_code='extract_exception' AND reason='insufficient_text'"
+            "SELECT COUNT(*) FROM docs WHERE state='failed' AND error_code='extract_exception' AND reason='insufficient_text' AND magic='pdf'"
         ).fetchone()[0]
         report["unstructured_failures"] = db.execute(
             "SELECT COUNT(*) FROM docs WHERE state='failed' AND error_code='extract_exception' AND reason<>'insufficient_text'"
@@ -1174,11 +1173,21 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
                     (item["error_code"], item["error_code"], item["path"]),
                 )
             db.execute(
-                """UPDATE docs SET state=CASE WHEN extractor LIKE '%TRUNCATED@20%' THEN 'partial' ELSE 'ocr_pending' END,
-                   error_code=CASE WHEN extractor LIKE '%TRUNCATED@20%' THEN 'ocr_incomplete' ELSE 'insufficient_text' END,
-                   reason='recovered after exhausted OCR budget',
+                """UPDATE docs SET state=CASE
+                       WHEN extractor LIKE '%TRUNCATED@20%' THEN 'partial'
+                       WHEN magic='pdf' THEN 'ocr_pending'
+                       ELSE 'excluded' END,
+                   error_code=CASE
+                       WHEN extractor LIKE '%TRUNCATED@20%' THEN 'ocr_incomplete'
+                       WHEN magic='pdf' THEN 'insufficient_text'
+                       ELSE 'insufficient_direct_text' END,
+                   reason=CASE WHEN magic='pdf' THEN 'recovered after exhausted OCR budget' ELSE 'insufficient direct text' END,
                    retry_count=CASE WHEN retry_count>0 THEN retry_count-1 ELSE 0 END
                    WHERE state='failed' AND error_code='extract_exception' AND reason='insufficient_text'"""
+            )
+            db.execute(
+                """UPDATE docs SET state='excluded',error_code='insufficient_direct_text',reason='insufficient direct text'
+                   WHERE state='ocr_pending' AND error_code='insufficient_text' AND magic<>'pdf'"""
             )
             db.execute(
                 "UPDATE docs SET error_code='invalid_zip' WHERE state='failed' AND error_code='extract_exception' AND reason LIKE 'File is not a zip file%'"
