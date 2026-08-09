@@ -31,6 +31,18 @@ notebooklm = load_module("gbrain_notebooklm", ROOT / "scripts/local-founder-brai
 
 
 class ExtractionContractTest(unittest.TestCase):
+    def test_founder_evaluation_fixture_covers_governance_and_unavailable_cases(self):
+        fixture = json.loads((ROOT / "evals/founder-brain-eval.json").read_text(encoding="utf-8"))
+        cases = fixture["cases"]
+        self.assertGreaterEqual(len(cases), 20)
+        statuses = {case["expected_status"] for case in cases}
+        self.assertTrue({"grounded", "unavailable", "requires_review"}.issubset(statuses))
+        self.assertTrue(any("notebooklm-personal" in case["expected_source_ids"] for case in cases))
+        self.assertTrue(any("notebooklm-faosx" in case["expected_source_ids"] for case in cases))
+        for case in cases:
+            if case["expected_status"] == "grounded" and case["expected_source_ids"] == ["frankbrain"]:
+                self.assertTrue(case["required_citations"], case["id"])
+
     def test_rejects_binary_and_embedded_payload(self):
         with self.assertRaisesRegex(ValueError, "binary_garbage"):
             extract.validate_text("hello" + "\x01" * 100)
