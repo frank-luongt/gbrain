@@ -1097,6 +1097,28 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
             source_path = Path(row["out_path"])
             if not source_path.exists():
                 counts["missing"] += 1
+                if not args.dry_run:
+                    source = next((candidate for candidate in sources if candidate.id == source_id), None)
+                    original_path = Path(row["src_path"])
+                    # Legacy state can point at a corpus file for a path that
+                    # current policy deliberately excludes (plugin caches,
+                    # worktrees, generated output). Record the exclusion
+                    # instead of reporting a permanent missing artifact.
+                    if source and should_skip(original_path, source.root):
+                        db.execute(
+                            """UPDATE docs SET state='excluded',error_code='generated_path_excluded',
+                                   reason='source path matches current generated/cache exclusion',updated_at=?
+                               WHERE sha256=?""",
+                            (now_iso(), row["sha256"]),
+                        )
+                    else:
+                        db.execute(
+                            """UPDATE docs SET state='discovered',error_code='missing_corpus_output',
+                                   reason='raw extraction output missing; queued for re-extraction',updated_at=?
+                               WHERE sha256=?""",
+                            (now_iso(), row["sha256"]),
+                        )
+                    db.commit()
                 continue
             try:
                 body = validate_text(strip_duplicate_title(strip_legacy_frontmatter(source_path.read_text(encoding="utf-8", errors="replace"))), 20)
