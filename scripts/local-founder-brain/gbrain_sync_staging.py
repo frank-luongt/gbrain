@@ -61,11 +61,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", choices=SOURCES, action="append")
     parser.add_argument("--timeout", type=int, default=900, help="seconds per source")
+    parser.add_argument(
+        "--slices", type=int, default=1,
+        help="bounded resume attempts per selected source; timeout slices resume gbrain's durable checkpoint",
+    )
     parser.add_argument("--no-embed", action="store_true")
     args = parser.parse_args()
+    if args.slices < 1:
+        parser.error("--slices must be at least 1")
     selected = tuple(args.source or SOURCES)
-    results = [run_source(source, args.timeout, args.no_embed) for source in selected]
-    print(json.dumps({"schema_version": 1, "sources": results}, sort_keys=True))
+    results: list[dict[str, object]] = []
+    for source in selected:
+        slices: list[dict[str, object]] = []
+        for attempt in range(1, args.slices + 1):
+            outcome = run_source(source, args.timeout, args.no_embed)
+            outcome["slice"] = attempt
+            slices.append(outcome)
+            # A completed source is converged. A non-timeout is actionable and
+            # retrying it would only repeat a deterministic failure.
+            if outcome["status"] != "timeout":
+                break
+        final_status = str(slices[-1]["status"])
+        results.append({
+            "source_id": source,
+            "status": final_status,
+            "slices": slices,
+            "completed_slices": sum(item["status"] == "success" for item in slices),
+        })
+    print(json.dumps({"schema_version": 2, "sources": results}, sort_keys=True))
     return 0 if all(item["status"] == "success" for item in results) else 1
 
 

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -453,6 +454,26 @@ class SyncContractTest(unittest.TestCase):
         self.assertIn('"--source", source_id', source)
         self.assertIn('Path.home() / ".bun" / "bin" / "gbrain"', source)
         self.assertNotIn('"--all"', source)
+
+    def test_timeout_slices_resume_only_until_converged(self):
+        outcomes = iter([
+            {"source_id": "faos-projects", "status": "timeout"},
+            {"source_id": "faos-projects", "status": "timeout"},
+            {"source_id": "faos-projects", "status": "success"},
+        ])
+        with mock.patch.object(syncer, "run_source", side_effect=lambda *_: next(outcomes)), \
+             mock.patch.object(sys, "argv", ["gbrain-extract-sync", "--source", "faos-projects", "--slices", "8"]), \
+             mock.patch("builtins.print") as printed:
+            self.assertEqual(syncer.main(), 0)
+        payload = json.loads(printed.call_args.args[0])
+        source = payload["sources"][0]
+        self.assertEqual(source["completed_slices"], 1)
+        self.assertEqual([item["slice"] for item in source["slices"]], [1, 2, 3])
+
+    def test_nightly_reserves_checkpointed_faos_sync_slices(self):
+        supervisor = (ROOT / "scripts/local-founder-brain/gbrain_nightly.py").read_text()
+        self.assertIn('"gdrive-workspaces", "--timeout", "900"', supervisor)
+        self.assertIn('"faos-projects", "--timeout", "900", "--slices", "8"', supervisor)
 
     def test_staging_commit_refuses_any_remote(self):
         source = (ROOT / "scripts/local-founder-brain/commit-staging.sh").read_text()

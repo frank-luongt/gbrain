@@ -75,16 +75,21 @@ def main() -> int:
         return max(0, deadline - time.monotonic() - reserve)
 
     try:
-        # Reserve 30m for both source-scoped syncs, 10m for reconciliation,
-        # two hours for resumable materialization, and 5m for staging commit.
+        # Keep every phase bounded inside the four-hour cycle. Large source
+        # syncs bank completed paths in gbrain's durable checkpoint, so give
+        # FAOS up to eight 15-minute resume slices rather than one monolithic
+        # process or a once-per-day replay. The phase caps sum to the cycle:
+        # extraction 45m, reconcile 10m, materialize 45m, staging commit 5m,
+        # Drive sync 15m, and FAOS sync 120m.
         steps.append(run_bounded(
-            ["gbrain-extract", "run", "--time-limit", str(int(min(4_500, remaining(9_900)))), "--ocr-page-budget", "2000"],
-            remaining(9_900),
+            ["gbrain-extract", "run", "--time-limit", str(int(min(2_700, remaining(11_700)))), "--ocr-page-budget", "2000"],
+            remaining(11_700),
         ))
-        steps.append(run_bounded(["gbrain-extract", "reconcile", "--fix-safe"], min(600, remaining(9_300))))
-        steps.append(run_bounded(["gbrain-extract", "materialize", "--time-limit", str(int(min(7_200, remaining(2_100))))], min(7_200, remaining(2_100))))
-        steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(1_800))))
-        steps.append(run_bounded(["gbrain-extract-sync", "--timeout", "900"], remaining()))
+        steps.append(run_bounded(["gbrain-extract", "reconcile", "--fix-safe"], min(600, remaining(11_100))))
+        steps.append(run_bounded(["gbrain-extract", "materialize", "--time-limit", str(int(min(2_700, remaining(8_400))))], min(2_700, remaining(8_400))))
+        steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(8_100))))
+        steps.append(run_bounded(["gbrain-extract-sync", "--source", "gdrive-workspaces", "--timeout", "900"], min(900, remaining(7_200))))
+        steps.append(run_bounded(["gbrain-extract-sync", "--source", "faos-projects", "--timeout", "900", "--slices", "8"], remaining()))
         status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
         steps.append(status_step)
         last_run = status_step.get("result", {}).get("last_run", {})
