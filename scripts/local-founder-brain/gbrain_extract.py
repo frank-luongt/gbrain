@@ -1068,7 +1068,7 @@ def untracked_staging_paths(source_root: Path) -> set[Path]:
 
 
 def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str, int]:
-    counts = {"documents": 0, "parts": 0, "missing": 0, "unchanged": 0, "partial": 0}
+    counts = {"documents": 0, "parts": 0, "missing": 0, "unchanged": 0, "partial": 0, "excluded": 0}
     deadline = time.monotonic() + getattr(args, "time_limit", DEFAULT_TIME_LIMIT)
     staging_root = Path(args.staging)
     untracked_by_source = {
@@ -1103,7 +1103,24 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
             except ValueError:
                 counts["missing"] += 1
                 continue
-            parts = split_text(body, MAX_MARKDOWN_BYTES - 8_000)
+            try:
+                parts = split_text(body, MAX_MARKDOWN_BYTES - 8_000)
+            except ValueError as error:
+                # A single token larger than the import ceiling cannot be
+                # split at any meaningful boundary.  Keep the raw extraction
+                # for audit, but govern it explicitly instead of blocking all
+                # other source documents or silently truncating it.
+                if str(error) != "unbreakable_text_segment_exceeds_import_limit":
+                    raise
+                if not args.dry_run:
+                    db.execute(
+                        """UPDATE docs SET state='excluded',error_code=?,reason=?,updated_at=?
+                           WHERE sha256=?""",
+                        (str(error), "staging import limit; raw extraction retained", now_iso(), row["sha256"]),
+                    )
+                    db.commit()
+                counts["excluded"] += 1
+                continue
             document_id = row["document_id"] or stable_document_id(row["sha256"])
             legacy_root = (DATA_ROOT / "corpus-md").resolve()
             try:
