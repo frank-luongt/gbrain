@@ -75,20 +75,21 @@ def main() -> int:
         return max(0, deadline - time.monotonic() - reserve)
 
     try:
-        # Reserve 30m for both source-scoped syncs, 10m each for deterministic
-        # reconciliation/materialization, and 5m for the local staging commit.
+        # Reserve 30m for both source-scoped syncs, 10m for reconciliation,
+        # two hours for resumable materialization, and 5m for staging commit.
         steps.append(run_bounded(
-            ["gbrain-extract", "run", "--time-limit", str(int(min(11_100, remaining(3_300)))), "--ocr-page-budget", "2000"],
-            remaining(3_300),
+            ["gbrain-extract", "run", "--time-limit", str(int(min(4_500, remaining(9_900)))), "--ocr-page-budget", "2000"],
+            remaining(9_900),
         ))
-        steps.append(run_bounded(["gbrain-extract", "reconcile", "--fix-safe"], min(600, remaining(2_700))))
-        steps.append(run_bounded(["gbrain-extract", "materialize"], min(600, remaining(2_100))))
+        steps.append(run_bounded(["gbrain-extract", "reconcile", "--fix-safe"], min(600, remaining(9_300))))
+        steps.append(run_bounded(["gbrain-extract", "materialize", "--time-limit", str(int(min(7_200, remaining(2_100))))], min(7_200, remaining(2_100))))
         steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(1_800))))
         steps.append(run_bounded(["gbrain-extract-sync", "--timeout", "900"], remaining()))
         status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
         steps.append(status_step)
         last_run = status_step.get("result", {}).get("last_run", {})
-        cycle_status = "success" if last_run.get("status") == "success" else "partial"
+        materialize_partial = bool(steps[2].get("result", {}).get("partial"))
+        cycle_status = "success" if last_run.get("status") == "success" and not materialize_partial else "partial"
         last_success_at = now_iso() if cycle_status == "success" else previous_success(status_path)
         payload = {
             "schema_version": 2, "completed_at": now_iso(), "cycle_status": cycle_status,

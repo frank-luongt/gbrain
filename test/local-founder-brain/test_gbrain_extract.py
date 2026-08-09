@@ -419,6 +419,13 @@ class HealthContractTest(unittest.TestCase):
         self.assertIn('"--ocr-page-budget", "2000"', supervisor)
         self.assertIn('"reconcile", "--fix-safe"', supervisor)
         self.assertIn("last_success_at", supervisor)
+        self.assertIn('"materialize", "--time-limit"', supervisor)
+
+    def test_materialization_is_bounded_and_checkpoints_documents(self):
+        source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()
+        self.assertIn("deadline = time.monotonic() + getattr(args, \"time_limit\"", source)
+        self.assertIn('counts["partial"] = 1', source)
+        self.assertIn('counts["documents"] % 100 == 0', source)
 
     def test_heartbeat_wrapper_fails_closed_on_extraction_freshness(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_heartbeat_wrapper.py").read_text()

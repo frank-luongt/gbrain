@@ -1044,7 +1044,8 @@ def untracked_staging_paths(source_root: Path) -> set[Path]:
 
 
 def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str, int]:
-    counts = {"documents": 0, "parts": 0, "missing": 0, "unchanged": 0}
+    counts = {"documents": 0, "parts": 0, "missing": 0, "unchanged": 0, "partial": 0}
+    deadline = time.monotonic() + getattr(args, "time_limit", DEFAULT_TIME_LIMIT)
     staging_root = Path(args.staging)
     untracked_by_source = {
         source.id: untracked_staging_paths(staging_root / source.id)
@@ -1058,6 +1059,9 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
             query += " AND source_id=?"
             params.append(args.source)
         for row in db.execute(query, params).fetchall():
+            if STOP or time.monotonic() >= deadline:
+                counts["partial"] = 1
+                break
             source_id = row["source_id"] or classify_source(row["src_path"], sources)
             if not source_id:
                 counts["missing"] += 1
@@ -1111,6 +1115,10 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                     )
                 counts["parts"] += 1
             counts["documents"] += 1
+            # A large code corpus must resume at document boundaries after a
+            # bounded cycle; retain each completed document's output ledger.
+            if not args.dry_run and counts["documents"] % 100 == 0:
+                db.commit()
         if not args.dry_run:
             db.commit()
     return counts
@@ -1241,6 +1249,7 @@ def build_parser() -> argparse.ArgumentParser:
     mat.add_argument("--source")
     mat.add_argument("--staging", default=str(DEFAULT_STAGING))
     mat.add_argument("--dry-run", action="store_true")
+    mat.add_argument("--time-limit", type=int, default=DEFAULT_TIME_LIMIT)
     mig = sub.add_parser("migrate-state")
     mig.add_argument("--dry-run", action="store_true")
     discover = sub.add_parser("_discover", help=argparse.SUPPRESS)
