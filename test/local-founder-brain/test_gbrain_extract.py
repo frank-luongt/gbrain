@@ -337,6 +337,39 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertEqual(result.status, "excluded")
             self.assertEqual(result.error_code, "insufficient_text")
 
+    def test_route_extracts_real_minimal_ooxml_and_safe_zip_leaf(self):
+        """Exercise the actual magic-byte/ZIP/XML path, not a source-string contract."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            docx = root / "brief.docx"
+            xml = "<document><body><p>Founder evidence covers operating principles, decisions, and current priorities.</p></body></document>"
+            import zipfile
+            with zipfile.ZipFile(docx, "w") as archive:
+                archive.writestr("word/document.xml", xml)
+            db = sqlite3.connect(":memory:")
+            db.row_factory = sqlite3.Row
+            extract.ensure_schema(db)
+            result, used = extract.route_extract(docx, db, "a" * 64, 0)
+            self.assertEqual((result.status, used), ("extracted", 0))
+            self.assertIn("Founder evidence", result.text)
+
+            archive_path = root / "evidence.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("notes/decision.md", "# Decision\n\nFounder-approved local evidence for the evaluation fixture.\n")
+            zipped, used = extract.route_extract(archive_path, db, "b" * 64, 0)
+            self.assertEqual((zipped.status, used), ("extracted", 0))
+            self.assertIn("Archive item: notes/decision.md", zipped.text)
+            db.close()
+
+    def test_zip_slip_is_a_governed_exclusion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "unsafe.zip"
+            import zipfile
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("../outside.md", "This must never be extracted outside the archive sandbox.")
+            result = extract.extract_zip_payloads(path)
+            self.assertEqual((result.status, result.error_code), ("excluded", "zip_unsafe_path"))
+
     def test_reconcile_repairs_exhausted_ocr_budget_failures(self):
         source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()
         self.assertIn("recovered after exhausted OCR budget", source)
