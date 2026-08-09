@@ -1136,7 +1136,7 @@ def materialize(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                         )
                     else:
                         db.execute(
-                            """UPDATE docs SET state='discovered',error_code='invalid_corpus_output',
+                            """UPDATE docs SET state='excluded',error_code='invalid_direct_text',
                                    reason=?,updated_at=? WHERE sha256=?""",
                             (f"raw extraction output failed validation: {error}", now_iso(), row["sha256"]),
                         )
