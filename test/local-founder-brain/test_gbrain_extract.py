@@ -536,6 +536,7 @@ class HealthContractTest(unittest.TestCase):
         self.assertIn("start_new_session=True", supervisor)
         self.assertIn('"--ocr-page-budget", "2000"', supervisor)
         self.assertIn('"reconcile", "--fix-safe"', supervisor)
+        self.assertIn('["gbrain", "extract", "--stale", "--catch-up", "--json"]', supervisor)
         self.assertIn("last_success_at", supervisor)
         self.assertIn('"materialize", "--time-limit"', supervisor)
 
@@ -591,7 +592,8 @@ class SyncContractTest(unittest.TestCase):
     def test_nightly_reserves_checkpointed_faos_sync_slices(self):
         supervisor = (ROOT / "scripts/local-founder-brain/gbrain_nightly.py").read_text()
         self.assertIn('"gdrive-workspaces", "--timeout", "900"', supervisor)
-        self.assertIn('"faos-projects", "--timeout", "900", "--slices", "8"', supervisor)
+        self.assertIn('"faos-projects", "--timeout", "900", "--slices", "4"', supervisor)
+        self.assertIn('["gbrain", "extract", "--stale", "--catch-up", "--json"]', supervisor)
         self.assertIn('["gbrain", "embed", "--stale", "--catch-up"]', supervisor)
 
     def test_staging_commit_refuses_any_remote(self):

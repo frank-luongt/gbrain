@@ -77,15 +77,15 @@ def main() -> int:
     try:
         # Keep every phase bounded inside the four-hour cycle. Large source
         # syncs bank completed paths in gbrain's durable checkpoint, so give
-        # FAOS up to eight 15-minute resume slices rather than one monolithic
-        # process or a once-per-day replay. The phase caps sum to the cycle:
+        # FAOS bounded resume slices rather than one monolithic process or a
+        # once-per-day replay. The phase caps deliberately sum to four hours:
         # extraction 45m, reconcile 10m, materialize 45m, staging commit 5m,
-        # Drive sync 15m, and FAOS sync 120m. When the earlier phases finish
-        # early, the remainder is a local Ollama stale-embedding backfill.
+        # Drive sync 15m, FAOS sync 60m, deterministic link extraction 20m,
+        # and local stale-embedding backfill 40m.
         # Leave exit-handshake time between a child deadline and its process
         # group supervisor.  Matching them exactly races a normal checkpoint
         # exit and was observed as a false `nightly_step_timeout`.
-        extraction_timeout = remaining(11_700)
+        extraction_timeout = min(2_700, remaining(11_700))
         steps.append(run_bounded(
             ["gbrain-extract", "run", "--time-limit", str(max(1, int(min(2_640, extraction_timeout - 30)))), "--ocr-page-budget", "2000"],
             extraction_timeout,
@@ -95,7 +95,11 @@ def main() -> int:
         steps.append(run_bounded(["gbrain-extract", "materialize", "--time-limit", str(max(1, int(min(2_640, materialize_timeout - 30))))], materialize_timeout))
         steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(8_100))))
         steps.append(run_bounded(["gbrain-extract-sync", "--source", "gdrive-workspaces", "--timeout", "900"], min(900, remaining(7_200))))
-        steps.append(run_bounded(["gbrain-extract-sync", "--source", "faos-projects", "--timeout", "900", "--slices", "8"], remaining()))
+        steps.append(run_bounded(["gbrain-extract-sync", "--source", "faos-projects", "--timeout", "900", "--slices", "4"], min(3_600, remaining(3_600))))
+        # Link extraction is deterministic and runs before any LLM-driven
+        # maintenance.  Its stale DB sweep only processes changed evidence,
+        # and is independently bounded so it cannot consume embedding time.
+        steps.append(run_bounded(["gbrain", "extract", "--stale", "--catch-up", "--json"], min(1_200, remaining(2_400))))
         # `embed --stale` is global in gbrain, but only operates on chunks
         # missing the active local Ollama vector. It is intentionally last so
         # every newly imported page is eligible and its bounded process group
@@ -104,7 +108,7 @@ def main() -> int:
         # batch, leaving a large imported source apparently fresh but only
         # partly embedded.  The enclosing four-hour deadline remains the
         # operational bound.
-        steps.append(run_bounded(["gbrain", "embed", "--stale", "--catch-up"], remaining()))
+        steps.append(run_bounded(["gbrain", "embed", "--stale", "--catch-up"], min(2_400, remaining())))
         status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
         steps.append(status_step)
         last_run = status_step.get("result", {}).get("last_run", {})
