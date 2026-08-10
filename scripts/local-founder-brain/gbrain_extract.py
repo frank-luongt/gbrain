@@ -1064,12 +1064,14 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                 })
             if STOP or time.monotonic() >= deadline:
                 break
-        # A completed cycle can contain bounded, governed document failures:
-        # they are retained in the manifest/state and retried according to
-        # policy.  They must not make every healthy nightly cycle appear
-        # stale forever.  Only an incomplete process-level cycle or a failed
-        # source traversal prevents freshness from advancing.
-        terminal = "partial" if STOP or time.monotonic() >= deadline or source_discovery_failed else "success"
+        # A completed cycle can contain bounded, governed document failures
+        # and a checkpointed OCR backlog.  They are retained in the
+        # manifest/state and retried according to policy; neither means the
+        # process itself failed.  A planned deadline is a clean checkpoint,
+        # not a failed heartbeat.  Only an interruption or a failed source
+        # traversal prevents freshness from advancing.
+        checkpointed = time.monotonic() >= deadline
+        terminal = "partial" if STOP or source_discovery_failed else "success"
         outstanding = {
             row[0]: row[1]
             for row in db.execute("SELECT state,COUNT(*) FROM docs WHERE state IN ('partial','ocr_pending','failed','unsupported','excluded') GROUP BY state")
@@ -1077,7 +1079,8 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
         manifest = {
             "schema_version": 1, "run_id": run_id,
             "started_at": db.execute("SELECT started_at FROM runs WHERE id=?", (run_id,)).fetchone()[0],
-            "completed_at": now_iso(), "status": terminal, "extractor_version": VERSION,
+            "completed_at": now_iso(), "status": terminal, "checkpointed": checkpointed,
+            "extractor_version": VERSION,
             "extraction_version": EXTRACTION_VERSION, "config_hash": config_hash,
             "sources": [source.id for source in selected], "counts": counts,
             "outstanding_states": outstanding,

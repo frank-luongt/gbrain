@@ -112,12 +112,18 @@ def main() -> int:
         status_step = run_bounded(["gbrain-extract", "status", "--json"], max(1, remaining()))
         steps.append(status_step)
         last_run = status_step.get("result", {}).get("last_run", {})
-        materialize_partial = bool(steps[2].get("result", {}).get("partial"))
-        cycle_status = "success" if last_run.get("status") == "success" and not materialize_partial else "partial"
+        # Materialization can checkpoint safely at a document boundary.  Its
+        # `partial` result is backlog telemetry, not a failed cycle.  The
+        # extractor uses the same convention for a planned bounded OCR slice.
+        # Freshness advances only when every process step exited successfully
+        # and source traversal itself completed without error.
+        materialize_checkpointed = bool(steps[2].get("result", {}).get("partial"))
+        cycle_status = "success" if last_run.get("status") == "success" else "partial"
         last_success_at = now_iso() if cycle_status == "success" else previous_success(status_path)
         payload = {
             "schema_version": 2, "completed_at": now_iso(), "cycle_status": cycle_status,
             "last_success_at": last_success_at, "last_run": last_run, "steps": steps,
+            "backlog": {"materialize_checkpointed": materialize_checkpointed},
         }
         atomic_write(status_path, payload)
         return 0 if cycle_status == "success" else 2

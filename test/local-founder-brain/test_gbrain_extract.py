@@ -564,6 +564,15 @@ class HealthContractTest(unittest.TestCase):
             result = health.probe(status, 24)
             self.assertTrue(result["ready"])
 
+    def test_planned_checkpoint_is_recorded_without_failing_cycle_freshness(self):
+        source = (ROOT / "scripts/local-founder-brain/gbrain_extract.py").read_text()
+        supervisor = (ROOT / "scripts/local-founder-brain/gbrain_nightly.py").read_text()
+        self.assertIn('checkpointed = time.monotonic() >= deadline', source)
+        self.assertIn('terminal = "partial" if STOP or source_discovery_failed else "success"', source)
+        self.assertIn('"checkpointed": checkpointed', source)
+        self.assertIn('"backlog": {"materialize_checkpointed": materialize_checkpointed}', supervisor)
+        self.assertIn('cycle_status = "success" if last_run.get("status") == "success" else "partial"', supervisor)
+
     def test_nightly_readiness_is_dependency_aware_and_four_hour_bounded(self):
         source = (ROOT / "scripts/local-founder-brain/run-nightly.sh").read_text()
         supervisor = (ROOT / "scripts/local-founder-brain/gbrain_nightly.py").read_text()
