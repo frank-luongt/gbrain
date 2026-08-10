@@ -872,6 +872,87 @@ def write_corpus_output(db: sqlite3.Connection, row: sqlite3.Row, extraction: Ex
     return output
 
 
+def refresh_document_owner(db: sqlite3.Connection, content_hash: str) -> bool:
+    """Apply deterministic source ownership after a membership change.
+
+    The generated output belongs to the current evidence owner.  Google Drive
+    wins an exact duplicate deliberately; otherwise preserve a stable lexical
+    choice rather than depending on traversal order.
+    """
+    memberships = db.execute(
+        "SELECT source_id,src_path FROM source_memberships WHERE sha256=? ORDER BY source_id,src_path",
+        (content_hash,),
+    ).fetchall()
+    if not memberships:
+        return False
+    owner = min(
+        memberships,
+        key=lambda row: (0 if row[0] == "gdrive-workspaces" else 1, row[0], row[1]),
+    )
+    db.execute(
+        "UPDATE source_memberships SET is_owner=CASE WHEN source_id=? AND src_path=? THEN 1 ELSE 0 END WHERE sha256=?",
+        (owner[0], owner[1], content_hash),
+    )
+    db.execute("UPDATE docs SET source_id=?,src_path=? WHERE sha256=?", (owner[0], owner[1], content_hash))
+    return True
+
+
+def remove_generated_file(path: str | None, roots: Sequence[Path]) -> None:
+    """Remove only a generated artifact rooted in an extractor-owned tree."""
+    if not path:
+        return
+    candidate = Path(path)
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return
+    if not any(root.resolve() in resolved.parents for root in roots):
+        return
+    try:
+        resolved.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def retire_unseen_memberships(
+    db: sqlite3.Connection, source: Source, seen_paths: set[str], staging_root: Path = DEFAULT_STAGING,
+) -> int:
+    """Retire paths absent from a completed source traversal.
+
+    This runs only after a whole source has been enumerated, never after a
+    bounded or targeted traversal.  A duplicate remains active through any
+    other membership; evidence with no remaining source path is excluded and
+    its extractor-owned corpus/staging artifacts are removed.
+    """
+    rows = db.execute(
+        "SELECT sha256,src_path FROM source_memberships WHERE source_id=?", (source.id,)
+    ).fetchall()
+    stale = [(row[0], row[1]) for row in rows if row[1] not in seen_paths]
+    for content_hash, source_path in stale:
+        db.execute(
+            "DELETE FROM source_memberships WHERE sha256=? AND source_id=? AND src_path=?",
+            (content_hash, source.id, source_path),
+        )
+        if not db.execute(
+            "SELECT 1 FROM source_memberships WHERE sha256=? AND src_path=? LIMIT 1",
+            (content_hash, source_path),
+        ).fetchone():
+            db.execute("DELETE FROM aliases WHERE sha256=? AND src_path=?", (content_hash, source_path))
+        if refresh_document_owner(db, content_hash):
+            continue
+        row = db.execute("SELECT out_path FROM docs WHERE sha256=?", (content_hash,)).fetchone()
+        remove_generated_file(row[0] if row else None, (DEFAULT_CORPUS, staging_root))
+        for output in db.execute("SELECT out_path FROM outputs WHERE sha256=?", (content_hash,)).fetchall():
+            remove_generated_file(output[0], (staging_root,))
+        db.execute("DELETE FROM outputs WHERE sha256=?", (content_hash,))
+        db.execute(
+            """UPDATE docs SET state='excluded',source_id=NULL,out_path=NULL,error_code='source_path_missing',
+               reason='source path was absent from completed traversal',updated_at=? WHERE sha256=?""",
+            (now_iso(), content_hash),
+        )
+    return len(stale)
+
+
 def upsert_discovery(db: sqlite3.Connection, source: Source, path: Path) -> tuple[sqlite3.Row, bool]:
     stat = path.stat()
     cached = db.execute("SELECT sha256 FROM path_cache WHERE src_path=? AND bytes=? AND mtime=?", (str(path), stat.st_size, stat.st_mtime)).fetchone()
@@ -886,6 +967,14 @@ def upsert_discovery(db: sqlite3.Connection, source: Source, path: Path) -> tupl
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)""",
             (content_hash, str(path), stat.st_size, str(path.parent), "discovered", path.suffix.lower().lstrip("."), sniff_magic(path), stat.st_mtime, now_iso(), source.id, stable_document_id(content_hash), EXTRACTION_VERSION),
         )
+    elif existing["state"] == "excluded" and existing["error_code"] == "source_path_missing":
+        # Reappearance of a deleted content hash is new evidence, not a
+        # permanent exclusion.  Re-extract it because the retired corpus file
+        # was intentionally removed.
+        db.execute(
+            "UPDATE docs SET state='discovered',out_path=NULL,error_code=NULL,reason=NULL,retry_count=0,updated_at=? WHERE sha256=?",
+            (now_iso(), content_hash),
+        )
     db.execute("INSERT OR IGNORE INTO aliases(sha256,src_path) VALUES(?,?)", (content_hash, str(path)))
     db.execute(
         """INSERT INTO source_memberships(sha256,source_id,src_path,is_owner,discovered_at) VALUES(?,?,?,?,?)
@@ -895,15 +984,7 @@ def upsert_discovery(db: sqlite3.Connection, source: Source, path: Path) -> tupl
     # Exact cross-source duplicates have one stable evidence owner even when
     # targeted extraction discovers FAOS before Google Drive.  All paths stay
     # aliases; Drive is the explicit precedence policy, never traversal order.
-    memberships = db.execute(
-        "SELECT source_id,src_path FROM source_memberships WHERE sha256=?", (content_hash,)
-    ).fetchall()
-    owner_id = next((row[0] for row in memberships if row[0] == "gdrive-workspaces"), None)
-    if owner_id is None:
-        owner_id = next((row[0] for row in memberships if row[0] == "faos-projects"), source.id)
-    owner_path = next(row[1] for row in memberships if row[0] == owner_id)
-    db.execute("UPDATE source_memberships SET is_owner=CASE WHEN source_id=? THEN 1 ELSE 0 END WHERE sha256=?", (owner_id, content_hash))
-    db.execute("UPDATE docs SET source_id=?,src_path=? WHERE sha256=?", (owner_id, owner_path, content_hash))
+    refresh_document_owner(db, content_hash)
     db.commit()
     return db.execute("SELECT * FROM docs WHERE sha256=?", (content_hash,)).fetchone(), is_new
 
@@ -938,7 +1019,7 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
         raise ValueError(f"Unknown or disabled source: {args.source}")
     deadline = time.monotonic() + args.time_limit
     ocr_budget = args.ocr_page_budget
-    counts = {"discovered": 0, "extracted": 0, "partial": 0, "skipped": 0, "failed": 0, "unsupported": 0, "excluded": 0, "ocr_pages": 0}
+    counts = {"discovered": 0, "extracted": 0, "partial": 0, "skipped": 0, "failed": 0, "unsupported": 0, "excluded": 0, "retired": 0, "ocr_pages": 0}
     manifest_outputs: list[dict[str, object]] = []
     manifest_failures: list[dict[str, object]] = []
     source_discovery_failed = False
@@ -974,12 +1055,16 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
         db.commit()
         seen_hashes: set[str] = set()
         for source in selected:
+            seen_paths: set[str] = set()
+            source_complete = True
             source_files: Iterable[Path] = [targeted_path] if targeted_path else discover_files(
                 source, getattr(args, "discovery_idle_timeout", 120.0),
             )
             for path in source_files:
                 if STOP or time.monotonic() >= deadline:
+                    source_complete = False
                     break
+                seen_paths.add(str(path))
                 row, is_new = upsert_discovery(db, source, path)
                 counts["discovered"] += int(is_new)
                 if row["sha256"] in seen_hashes:
@@ -1056,12 +1141,16 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
                     })
             if isinstance(source_files, DiscoveryStream) and source_files.error:
                 source_discovery_failed = True
+                source_complete = False
                 counts["failed"] += 1
                 manifest_failures.append({
                     "document_id": None, "content_hash": None, "source_id": source.id,
                     "state": "failed", "error_code": "source_discovery_failed",
                     "reason": source_files.error,
                 })
+            if source_complete and not targeted_path:
+                counts["retired"] += retire_unseen_memberships(db, source, seen_paths)
+                db.commit()
             if STOP or time.monotonic() >= deadline:
                 break
         # A completed cycle can contain bounded, governed document failures

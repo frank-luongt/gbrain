@@ -124,6 +124,45 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertEqual(row["source_id"], "gdrive-workspaces")
             self.assertEqual(dict(owners), {"faos-projects": 0, "gdrive-workspaces": 1})
 
+    def test_completed_source_walk_retires_deleted_path_but_preserves_duplicate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            drive_root, faos_root = root / "Drive", root / "FAOS"
+            drive_root.mkdir()
+            faos_root.mkdir()
+            drive_file, faos_file = drive_root / "same.md", faos_root / "same.md"
+            drive_file.write_text("same evidence", encoding="utf-8")
+            faos_file.write_text("same evidence", encoding="utf-8")
+            with extract.connect(root / "state.sqlite3") as db:
+                extract.ensure_schema(db)
+                row, _ = extract.upsert_discovery(db, extract.Source("gdrive-workspaces", drive_root, "document"), drive_file)
+                extract.upsert_discovery(db, extract.Source("faos-projects", faos_root, "document-and-code"), faos_file)
+                retired = extract.retire_unseen_memberships(
+                    db, extract.Source("gdrive-workspaces", drive_root, "document"), set(), root / "staging",
+                )
+                survivor = db.execute("SELECT source_id,state FROM docs WHERE sha256=?", (row["sha256"],)).fetchone()
+                aliases = [value[0] for value in db.execute("SELECT src_path FROM aliases WHERE sha256=?", (row["sha256"],))]
+            self.assertEqual(retired, 1)
+            self.assertEqual(tuple(survivor), ("faos-projects", "discovered"))
+            self.assertEqual(aliases, [str(faos_file)])
+
+    def test_completed_source_walk_retires_last_path_and_reappearance_is_extractable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            drive_root = root / "Drive"
+            drive_root.mkdir()
+            evidence = drive_root / "evidence.md"
+            evidence.write_text("founder evidence", encoding="utf-8")
+            with extract.connect(root / "state.sqlite3") as db:
+                extract.ensure_schema(db)
+                row, _ = extract.upsert_discovery(db, extract.Source("gdrive-workspaces", drive_root, "document"), evidence)
+                extract.retire_unseen_memberships(db, extract.Source("gdrive-workspaces", drive_root, "document"), set(), root / "staging")
+                retired = db.execute("SELECT state,error_code FROM docs WHERE sha256=?", (row["sha256"],)).fetchone()
+                revived, is_new = extract.upsert_discovery(db, extract.Source("gdrive-workspaces", drive_root, "document"), evidence)
+            self.assertEqual(tuple(retired), ("excluded", "source_path_missing"))
+            self.assertFalse(is_new)
+            self.assertEqual(revived["state"], "discovered")
+
     def test_targeted_document_rejects_disabled_source(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
