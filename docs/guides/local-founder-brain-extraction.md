@@ -43,7 +43,7 @@ The walker excludes build products, caches, model artifacts, Claude worktrees/au
 
 ## Install and migrate
 
-Run these commands from Frank's gbrain fork:
+Run these commands from the designated gbrain fork:
 
 ```bash
 scripts/local-founder-brain/install-local.sh
@@ -138,4 +138,4 @@ status marker has been created; no credential or document content is copied into
 - Re-running extraction and materialization is idempotent; unchanged inputs are not reprocessed.
 
 Do not open an upstream PR for this local workflow. gbrain, LLM Wiki, and Hermes changes stay in
-Frank's forks.
+the designated forks.

@@ -541,7 +541,12 @@ def extract_ooxml(path: Path, kind: str) -> Extraction:
                 selected = [name for name in names if (name.startswith("xl/") or name.startswith("content")) and name.endswith(".xml")]
             else:
                 selected = [name for name in names if name.endswith((".xhtml", ".html", ".xml")) and "META-INF" not in name]
+            expanded = 0
             for name in selected:
+                info = archive.getinfo(name)
+                expanded += info.file_size
+                if info.file_size > MAX_ZIP_EXPANDED_BYTES or expanded > MAX_ZIP_EXPANDED_BYTES:
+                    return Extraction("", f"ooxml-zip:{kind}", "excluded", "zip_expansion_limit", str(expanded))
                 data = archive.read(name)
                 try:
                     root = ET.fromstring(data)
@@ -680,6 +685,7 @@ def extract_with_libreoffice(path: Path) -> Extraction:
 
 def extract_zip_payloads(path: Path) -> Extraction:
     pieces: list[str] = []
+    child_failures: list[Extraction] = []
     total = 0
     try:
       archive_context = zipfile.ZipFile(path)
@@ -708,8 +714,14 @@ def extract_zip_payloads(path: Path) -> Extraction:
                 child = Extraction(validate_text(target.read_text(encoding="utf-8", errors="replace")), "text")
             else:
                 child = extract_ooxml(target, ext.lstrip("."))
-            pieces.append(f"# Archive item: {info.filename}\n\n{child.text}")
+            if child.status == "extracted" and child.text:
+                pieces.append(f"# Archive item: {info.filename}\n\n{child.text}")
+            else:
+                child_failures.append(child)
     if not pieces:
+        if child_failures:
+            first = child_failures[0]
+            return Extraction("", "zip", first.status, first.error_code, first.reason)
         return Extraction("", "zip", "excluded", "zip_no_readable_payload", None)
     return Extraction(validate_text("\n\n".join(pieces)), "zip:safe-leaf")
 
@@ -876,9 +888,22 @@ def upsert_discovery(db: sqlite3.Connection, source: Source, path: Path) -> tupl
         )
     db.execute("INSERT OR IGNORE INTO aliases(sha256,src_path) VALUES(?,?)", (content_hash, str(path)))
     db.execute(
-        "INSERT OR IGNORE INTO source_memberships(sha256,source_id,src_path,is_owner,discovered_at) VALUES(?,?,?,?,?)",
-        (content_hash, source.id, str(path), 1 if is_new else 0, now_iso()),
+        """INSERT INTO source_memberships(sha256,source_id,src_path,is_owner,discovered_at) VALUES(?,?,?,?,?)
+           ON CONFLICT(sha256,source_id,src_path) DO UPDATE SET discovered_at=excluded.discovered_at""",
+        (content_hash, source.id, str(path), 0, now_iso()),
     )
+    # Exact cross-source duplicates have one stable evidence owner even when
+    # targeted extraction discovers FAOS before Google Drive.  All paths stay
+    # aliases; Drive is the explicit precedence policy, never traversal order.
+    memberships = db.execute(
+        "SELECT source_id,src_path FROM source_memberships WHERE sha256=?", (content_hash,)
+    ).fetchall()
+    owner_id = next((row[0] for row in memberships if row[0] == "gdrive-workspaces"), None)
+    if owner_id is None:
+        owner_id = next((row[0] for row in memberships if row[0] == "faos-projects"), source.id)
+    owner_path = next(row[1] for row in memberships if row[0] == owner_id)
+    db.execute("UPDATE source_memberships SET is_owner=CASE WHEN source_id=? THEN 1 ELSE 0 END WHERE sha256=?", (owner_id, content_hash))
+    db.execute("UPDATE docs SET source_id=?,src_path=? WHERE sha256=?", (owner_id, owner_path, content_hash))
     db.commit()
     return db.execute("SELECT * FROM docs WHERE sha256=?", (content_hash,)).fetchone(), is_new
 
@@ -906,6 +931,8 @@ def run_extract(args: argparse.Namespace, sources: Sequence[Source]) -> dict[str
             raise ValueError(f"Target document is outside configured source roots: {targeted_path}")
         if args.source and owner.id != args.source:
             raise ValueError(f"Target document belongs to {owner.id}, not {args.source}")
+        if not owner.enabled:
+            raise ValueError(f"Target document belongs to disabled source: {owner.id}")
         selected = [owner]
     if args.source and not selected:
         raise ValueError(f"Unknown or disabled source: {args.source}")
@@ -1289,6 +1316,19 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
                 shutil.move(str(path), str(target))
             for value in report["orphans"]:
                 move_to_quarantine(Path(value))
+            # A missing raw corpus output is recoverable only if the document
+            # becomes eligible for extraction again.  Clearing its pointer and
+            # output ledger prevents the current-version fast path from
+            # preserving a permanent staging hole.
+            for value in report["manifest_missing"]:
+                db.execute(
+                    """UPDATE docs SET state='discovered',out_path=NULL,
+                           error_code='missing_corpus_output',
+                           reason='reconcile requested regeneration',updated_at=?
+                       WHERE out_path=?""",
+                    (now_iso(), value),
+                )
+                db.execute("DELETE FROM outputs WHERE out_path=?", (value,))
             for item in report["invalid_output"]:
                 move_to_quarantine(Path(item["path"]))
                 db.execute(

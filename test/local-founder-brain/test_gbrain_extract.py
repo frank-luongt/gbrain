@@ -108,6 +108,46 @@ class ExtractionContractTest(unittest.TestCase):
             self.assertNotIn("blob.bin", discovered)
             self.assertNotIn("ignored.js", discovered)
 
+    def test_duplicate_membership_promotes_google_drive_to_stable_owner(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            faos_root, drive_root = root / "FAOS", root / "Drive"
+            faos_root.mkdir()
+            drive_root.mkdir()
+            (faos_root / "evidence.md").write_text("same founder evidence", encoding="utf-8")
+            (drive_root / "evidence.md").write_text("same founder evidence", encoding="utf-8")
+            with extract.connect(root / "state.sqlite3") as db:
+                extract.ensure_schema(db)
+                extract.upsert_discovery(db, extract.Source("faos-projects", faos_root, "document-and-code"), faos_root / "evidence.md")
+                row, _ = extract.upsert_discovery(db, extract.Source("gdrive-workspaces", drive_root, "document"), drive_root / "evidence.md")
+                owners = db.execute("SELECT source_id,is_owner FROM source_memberships WHERE sha256=? ORDER BY source_id", (row["sha256"],)).fetchall()
+            self.assertEqual(row["source_id"], "gdrive-workspaces")
+            self.assertEqual(dict(owners), {"faos-projects": 0, "gdrive-workspaces": 1})
+
+    def test_targeted_document_rejects_disabled_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            document = root / "private.md"
+            document.write_text("evidence", encoding="utf-8")
+            args = types.SimpleNamespace(source=None, document=str(document), time_limit=1, ocr_page_budget=0,
+                                         max_retries=3, config=str(root / "sources.json"), db=str(root / "state.sqlite3"))
+            with self.assertRaisesRegex(ValueError, "disabled source"):
+                extract.run_extract(args, [extract.Source("gdrive-workspaces", root.resolve(), "document", False)])
+
+    def test_ooxml_expansion_limit_is_enforced_before_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "fixture.docx"
+            with extract.zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("word/document.xml", "<x>this exceeds the test limit</x>")
+            original = extract.MAX_ZIP_EXPANDED_BYTES
+            try:
+                extract.MAX_ZIP_EXPANDED_BYTES = 8
+                result = extract.extract_ooxml(path, "docx")
+            finally:
+                extract.MAX_ZIP_EXPANDED_BYTES = original
+            self.assertEqual(result.status, "excluded")
+            self.assertEqual(result.error_code, "zip_expansion_limit")
+
     def test_discovery_runs_out_of_process_and_streams_supported_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

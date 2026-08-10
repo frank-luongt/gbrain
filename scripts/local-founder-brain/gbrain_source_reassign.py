@@ -17,9 +17,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 GDRIVE_PATTERN = "%/Library/CloudStorage/GoogleDrive-%/My Drive/1 Workspaces/%"
 FAOS_PATTERN = "%/Projects/FAOS/%"
-GDRIVE_STAGING = str(Path("~/gbrain-sources/staging/gdrive-workspaces").expanduser())
-FAOS_STAGING = str(Path("~/gbrain-sources/staging/faos-projects").expanduser())
-DEFAULT_QUARANTINE_REPORT = Path("~/gbrain-sources/logs/source-reassignment-quarantine.json").expanduser()
+EXTRACT_ROOT = Path(os.environ.get("GBRAIN_EXTRACT_ROOT", "~/gbrain-sources")).expanduser()
+STAGING_ROOT = Path(os.environ.get("GBRAIN_EXTRACT_STAGING", str(EXTRACT_ROOT / "staging"))).expanduser()
+GDRIVE_STAGING = str(STAGING_ROOT / "gdrive-workspaces")
+FAOS_STAGING = str(STAGING_ROOT / "faos-projects")
+DEFAULT_QUARANTINE_REPORT = EXTRACT_ROOT / "logs/source-reassignment-quarantine.json"
 
 
 def resolve_database_url(explicit: str | None) -> str | None:
