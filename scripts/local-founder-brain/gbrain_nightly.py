@@ -82,12 +82,17 @@ def main() -> int:
         # extraction 45m, reconcile 10m, materialize 45m, staging commit 5m,
         # Drive sync 15m, and FAOS sync 120m. When the earlier phases finish
         # early, the remainder is a local Ollama stale-embedding backfill.
+        # Leave exit-handshake time between a child deadline and its process
+        # group supervisor.  Matching them exactly races a normal checkpoint
+        # exit and was observed as a false `nightly_step_timeout`.
+        extraction_timeout = remaining(11_700)
         steps.append(run_bounded(
-            ["gbrain-extract", "run", "--time-limit", str(int(min(2_700, remaining(11_700)))), "--ocr-page-budget", "2000"],
-            remaining(11_700),
+            ["gbrain-extract", "run", "--time-limit", str(max(1, int(min(2_640, extraction_timeout - 30)))), "--ocr-page-budget", "2000"],
+            extraction_timeout,
         ))
         steps.append(run_bounded(["gbrain-extract", "reconcile", "--fix-safe"], min(600, remaining(11_100))))
-        steps.append(run_bounded(["gbrain-extract", "materialize", "--time-limit", str(int(min(2_700, remaining(8_400))))], min(2_700, remaining(8_400))))
+        materialize_timeout = min(2_700, remaining(8_400))
+        steps.append(run_bounded(["gbrain-extract", "materialize", "--time-limit", str(max(1, int(min(2_640, materialize_timeout - 30))))], materialize_timeout))
         steps.append(run_bounded(["gbrain-extract-commit-staging"], min(300, remaining(8_100))))
         steps.append(run_bounded(["gbrain-extract-sync", "--source", "gdrive-workspaces", "--timeout", "900"], min(900, remaining(7_200))))
         steps.append(run_bounded(["gbrain-extract-sync", "--source", "faos-projects", "--timeout", "900", "--slices", "8"], remaining()))
