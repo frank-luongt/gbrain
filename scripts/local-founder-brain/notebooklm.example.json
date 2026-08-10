@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "accounts": [
+    {
+      "id": "notebooklm-personal",
+      "profile": "personal",
+      "enabled": true
+    },
+    {
+      "id": "notebooklm-faosx",
+      "profile": "faosx",
+      "enabled": true
+    }
+  ]
+}

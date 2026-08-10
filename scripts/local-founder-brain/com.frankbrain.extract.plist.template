@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.frankbrain.extract</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.gbrain/bin/gbrain-extract-nightly</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>2</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>ThrottleInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>__HOME__/gbrain-sources/logs/launchd.stdout.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/gbrain-sources/logs/launchd.stderr.log</string>
+</dict>
+</plist>

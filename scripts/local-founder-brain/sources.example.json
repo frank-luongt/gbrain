@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "gdrive-workspaces",
+      "root": "~/Library/CloudStorage/GoogleDrive-*/My Drive/1 Workspaces",
+      "pipeline": "document",
+      "enabled": true
+    },
+    {
+      "id": "faos-projects",
+      "root": "~/Projects/FAOS",
+      "pipeline": "document-and-code",
+      "enabled": true
+    }
+  ]
+}
